@@ -45,7 +45,22 @@ Initial release — F0 (installable skeleton).
   pattern: cache outside `/opt/PegaProx` (`/usr/local/lib/truenas`) +
   `truenas-maintenance.timer` persistence guard, SQLCipher-safe enable
   fallback, systemd-user-aware chown.
-- 50 unit/route tests, 90%+ line coverage on `core/`.
+- Connection-lifecycle hardening (post-review, two rounds): the reader
+  thread no longer dies on a malformed frame; a failed relogin after
+  reconnect tears down the half-authenticated socket instead of reporting
+  a healthy connection that isn't; `close()` atomically cancels any
+  in-flight/future automatic reconnect (closing a TOCTOU window between
+  the "is it closed?" check and the reconnect worker acquiring the
+  connection lock, where a race could otherwise resurrect the socket and
+  relogin with a stale API key); a non-blocking guard prevents duplicate
+  reconnect workers; the transport clears its recv timeout after connect
+  so an idle-but-healthy connection doesn't churn through reconnect+relogin
+  every ~10s; `conn_manager.test_connection()` always builds a throwaway
+  client from the given config instead of reusing an id-cached client
+  (which could report success while testing a stale host); `instances/test`
+  now applies the same use_tls-with-key safety guard as the save path.
+- 74 tests (unit + route-level), verified via `pytest --collect-only -q`.
+  92%+ line coverage on `core/`, 88%+ on `routes/`.
 
 No subsystem (pools/datasets/snapshots/shares/replication/apps_vms) is
 implemented yet — every non-Settings tab is empty chrome. See

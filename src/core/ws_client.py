@@ -159,22 +159,44 @@ class TrueNASWSClient:
 
     # -- connection lifecycle ------------------------------------------------
 
-    def connect(self):
+    def connect(self, _clear_closed=True):
         """Open the WebSocket if not already connected. Idempotent.
 
         Raises ``TrueNASConnectionError`` on failure; never raises on an
         already-open connection.
+
+        ``_clear_closed`` is internal plumbing, not a public parameter for
+        callers to pass. Only a direct, explicit ``connect()`` call (the
+        default, ``_clear_closed=True``) is allowed to clear a prior
+        ``close()`` and reopen the client. ``_connect_with_backoff`` —
+        shared by lazy-connect (``_ensure_connected``) AND the background
+        reconnect worker — always calls ``self.connect(_clear_closed=False)``
+        so the "is this client closed?" check and the actual (re)connect
+        happen ATOMICALLY under this same lock acquisition.
+
+        This closes a residual TOCTOU: an earlier fix made ``close()`` set
+        ``self._closed`` and had callers check it BEFORE calling
+        ``connect()`` — but a ``close()`` from another thread landing in the
+        gap between that check and this method acquiring ``_connect_lock``
+        would still let the reconnect worker open a fresh socket and
+        relogin with the stale ``_api_key``, exactly the resurrection bug
+        this design exists to prevent. Folding the check inside the lock
+        removes the gap entirely.
         """
         with self._connect_lock:
             if self._connected:
                 return
+            if self._closed and not _clear_closed:
+                raise TrueNASConnectionError(
+                    'client was closed; refusing to reconnect without an explicit connect()')
             try:
                 self._ws = self._transport_factory(self.url(), self.verify_tls, self.timeout)
             except Exception as e:
                 self._last_error = str(e)
                 raise TrueNASConnectionError(f'could not connect to {self.host}:{self.port}: {e}') from e
             self._connected = True
-            self._closed = False  # explicit (re)connect always clears a prior close()
+            if _clear_closed:
+                self._closed = False  # explicit (re)connect always clears a prior close()
             self._last_error = None
             self._stop_reader.clear()
             self._reader_thread = threading.Thread(
@@ -221,27 +243,34 @@ class TrueNASWSClient:
         ``max_attempts`` is exhausted. Backoff delay is
         ``min(cap, base * 2**attempt) * (0.5 + random())`` — capped jitter,
         never a thundering herd against a struggling appliance.
+
+        Always calls ``connect(_clear_closed=False)`` — this is the
+        internal path (shared by lazy-connect and the background reconnect
+        worker), never a direct user call, so it must never resurrect a
+        client the user explicitly closed. The ``_closed`` check itself
+        happens atomically INSIDE ``connect()``'s lock, not here — a
+        separate pre-check here would reopen the exact TOCTOU window
+        ``connect()`` closes (see its docstring). The ``self._closed``
+        check below the exception is just a fast-path to skip a pointless
+        backoff sleep once we already know why the last attempt failed; it
+        is NOT the correctness guarantee.
         """
         attempts = max_attempts if max_attempts is not None else self.max_reconnect_attempts
         last_exc = None
         for attempt in range(attempts):
-            if self._closed:
-                raise TrueNASConnectionError(
-                    'client was closed; reconnect cancelled before this attempt')
             try:
-                self.connect()
+                self.connect(_clear_closed=False)
                 return
             except TrueNASConnectionError as e:
                 last_exc = e
+                if self._closed:
+                    raise
                 if attempt < attempts - 1:
                     delay = min(self.backoff_cap_s, self.backoff_base_s * (2 ** attempt))
                     delay *= (0.5 + random.random())
                     log.warning(f'[truenas] reconnect attempt {attempt + 1}/{attempts} '
                                 f'failed, retrying in {delay:.1f}s: {e}')
                     self._sleep(delay)
-                    if self._closed:
-                        raise TrueNASConnectionError(
-                            'client was closed during reconnect backoff; cancelled') from e
         raise last_exc or TrueNASConnectionError('reconnect failed for unknown reason')
 
     def _relogin_and_resubscribe(self):

@@ -661,6 +661,99 @@ def test_close_during_backoff_sleep_cancels_pending_reconnect():
     # NOT quietly succeed and flip is_connected back to True.
 
 
+class _RaceLock:
+    """Wraps a real lock; the FIRST acquire() triggers a one-shot callback
+    BEFORE actually acquiring — used to force a concurrent close() to land
+    in the exact gap a non-atomic "is it closed?" check would have left
+    open, proving the real gate (inside connect(), under this same lock)
+    closes it instead."""
+
+    def __init__(self, real_lock, on_first_acquire):
+        self._real = real_lock
+        self._on_first_acquire = on_first_acquire
+        self._triggered = False
+
+    def acquire(self, *a, **kw):
+        if not self._triggered:
+            self._triggered = True
+            self._on_first_acquire()
+        return self._real.acquire(*a, **kw)
+
+    def release(self):
+        return self._real.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        self.release()
+
+
+def test_toctou_close_racing_the_lock_acquisition_does_not_resurrect_stale_key():
+    """The residual TOCTOU from the previous round: connect() used to set
+    ``self._closed = False`` unconditionally, and callers checked
+    ``_closed`` BEFORE calling connect() — a close() landing in the gap
+    between that check and connect() acquiring ``_connect_lock`` would
+    still let the reconnect worker open a fresh socket and relogin with
+    the stale api_key. Force that exact interleave by wrapping
+    ``_connect_lock`` so the first acquire (by the reconnect worker's
+    ``connect()`` call) triggers a REAL close() from another thread first,
+    then proceeds — proving the post-acquisition, atomic recheck inside
+    ``connect()`` refuses to resurrect instead of racing through."""
+    ft1 = FakeTransport()
+    later_transports = []
+
+    def factory(url, verify_tls, timeout):
+        ft = FakeTransport()
+        later_transports.append(ft)
+        return ft
+
+    client = TrueNASWSClient('truenas.example', 443,
+                              transport_factory=lambda *a, **k: ft1,
+                              sleep_fn=lambda s: None, max_reconnect_attempts=2)
+    client.connect()
+
+    # Establish a session — a resurrection would show up as a relogin
+    # attempt on a NEW transport carrying this same stale key.
+    def do_login():
+        client.login('stale-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft1.sent)
+    req = json.loads(ft1.sent[0])
+    ft1.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    # From here on, any reconnect attempt would use `factory` (a fresh
+    # transport each time) — but the race below must prevent one from ever
+    # being requested at all.
+    client._transport_factory = factory
+
+    def close_from_another_thread():
+        close_thread = threading.Thread(target=client.close)
+        close_thread.start()
+        close_thread.join(timeout=2)
+
+    # Wrap the SAME lock object connect()/close()/_teardown_socket all
+    # reference via self._connect_lock — the first time anything acquires
+    # it after the drop, a real close() runs to completion first.
+    client._connect_lock = _RaceLock(client._connect_lock, close_from_another_thread)
+
+    ft1.push_error(ConnectionResetError('simulated socket drop'))
+
+    assert _wait_for(lambda: client._closed, timeout=3)
+    assert _wait_for(lambda: not client._reconnecting, timeout=3)
+
+    assert not client.is_connected
+    # The core assertion: connect() must have refused to open ANY new
+    # transport once it observed (atomically, post-race) that the client
+    # was closed — so no reconnect socket, and no relogin with the stale
+    # key, ever happened.
+    assert later_transports == []
+
+
 def test_explicit_connect_reopens_after_close():
     """A deliberate connect() call after close() must succeed and clear
     _closed — close() is not a permanent brick, only a cancellation of
