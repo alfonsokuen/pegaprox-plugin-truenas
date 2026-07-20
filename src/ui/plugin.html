@@ -121,12 +121,64 @@
   <section class="tab" id="tab-overview"><div id="ov-body" class="empty">Elegí una instancia arriba para ver su estado.</div></section>
   <section class="tab" id="tab-pools"><div id="pools-body" class="empty">Elegí una instancia arriba para ver sus pools.</div></section>
   <section class="tab" id="tab-datasets">
-    <div class="subtab-hint">Solo lectura en F1 — crear/editar llega en F2.</div>
+    <div class="toolbar">
+      <div class="subtab-hint" style="margin:0">Crear/editar/borrar contra la instancia seleccionada (F2).</div>
+      <button class="btn" id="btn-new-dataset">+ Nuevo dataset</button>
+    </div>
     <div id="datasets-body" class="empty">Elegí una instancia arriba.</div>
+
+    <div class="card" id="dataset-write-card" hidden>
+      <h2 id="dataset-write-title">Nuevo dataset</h2>
+      <div class="field" id="dataset-write-name-field">
+        <label>Nombre completo (pool/dataset)</label>
+        <input type="text" id="dsw-name" placeholder="pool/nombre-dataset">
+      </div>
+      <div class="field" id="dataset-write-changes-field" hidden>
+        <label>Campos (JSON) — p.ej. <code>{"volsize": 4294967296, "force_size": true}</code></label>
+        <textarea id="dsw-changes" rows="4"></textarea>
+      </div>
+      <div class="field" id="dataset-write-confirm-field" hidden>
+        <label>Escribí el nombre completo del dataset para confirmar el borrado</label>
+        <input type="text" id="dsw-confirm">
+      </div>
+      <div class="row-actions">
+        <button class="btn secondary" id="btn-dataset-preview">Vista previa</button>
+        <button class="btn" id="btn-dataset-confirm" disabled>Confirmar y ejecutar</button>
+        <button class="btn secondary" id="btn-dataset-cancel">Cancelar</button>
+      </div>
+      <pre id="dataset-write-preview" style="white-space:pre-wrap;font-size:12px;margin-top:10px"></pre>
+      <div id="dataset-write-result" style="font-size:13px;margin-top:6px"></div>
+    </div>
   </section>
   <section class="tab" id="tab-snapshots">
-    <div class="subtab-hint">Solo lectura en F1 — crear/borrar llega en F2.</div>
+    <div class="toolbar">
+      <div class="subtab-hint" style="margin:0">Crear/borrar snapshots contra la instancia seleccionada (F2).</div>
+      <button class="btn" id="btn-new-snapshot">+ Nuevo snapshot</button>
+    </div>
     <div id="snapshots-body" class="empty">Elegí una instancia arriba.</div>
+
+    <div class="card" id="snapshot-write-card" hidden>
+      <h2 id="snapshot-write-title">Nuevo snapshot</h2>
+      <div class="field-row" id="snapshot-create-fields">
+        <div class="field"><label>Dataset</label><input type="text" id="ssw-dataset" placeholder="pool/dataset"></div>
+        <div class="field"><label>Nombre del snapshot</label><input type="text" id="ssw-name"></div>
+      </div>
+      <div class="checkbox-field" id="snapshot-recursive-field">
+        <input type="checkbox" id="ssw-recursive">
+        <label for="ssw-recursive" style="margin:0">recursive</label>
+      </div>
+      <div class="field" id="snapshot-write-confirm-field" hidden>
+        <label>Escribí el id completo (<code>dataset@nombre</code>) para confirmar el borrado</label>
+        <input type="text" id="ssw-confirm">
+      </div>
+      <div class="row-actions">
+        <button class="btn secondary" id="btn-snapshot-preview">Vista previa</button>
+        <button class="btn" id="btn-snapshot-confirm" disabled>Confirmar y ejecutar</button>
+        <button class="btn secondary" id="btn-snapshot-cancel">Cancelar</button>
+      </div>
+      <pre id="snapshot-write-preview" style="white-space:pre-wrap;font-size:12px;margin-top:10px"></pre>
+      <div id="snapshot-write-result" style="font-size:13px;margin-top:6px"></div>
+    </div>
   </section>
   <section class="tab" id="tab-shares">
     <div class="subtab-hint">Solo lectura en F1 — CRUD llega en F3.</div>
@@ -605,24 +657,71 @@
     overview: null,  // handled specially in refreshTab
     pools: renderPools,
     datasets: function (body, items) {
-      renderSimpleTable(body, items, [
-        ['Nombre', function (d) { return d.name || d.id; }],
-        ['Tipo', function (d) { return d.type || ''; }],
-        ['Uso', function (d) { return (d.used && d.used.parsed) || ''; }],
-        ['Disponible', function (d) { return (d.available && d.available.parsed) || ''; }],
-      ]);
+      body.className = '';
+      body.innerHTML = '';
+      if (!items || !items.length) {
+        body.className = 'empty';
+        body.textContent = 'Sin datasets.';
+        return;
+      }
+      var table = document.createElement('table');
+      table.innerHTML = '<thead><tr><th>Nombre</th><th>Tipo</th><th>Uso</th>' +
+        '<th>Disponible</th><th></th></tr></thead>';
+      var tbody = document.createElement('tbody');
+      items.forEach(function (d) {
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + esc(d.name || d.id) + '</td>' +
+          '<td>' + esc(d.type || '') + '</td>' +
+          '<td>' + esc((d.used && d.used.parsed) || '') + '</td>' +
+          '<td>' + esc((d.available && d.available.parsed) || '') + '</td>' +
+          '<td class="row-actions"></td>';
+        var actions = tr.querySelector('td:last-child');
+        var editBtn = document.createElement('button');
+        editBtn.className = 'btn secondary';
+        editBtn.textContent = 'Editar';
+        editBtn.addEventListener('click', function () { openDatasetForm('update', d); });
+        var delBtn = document.createElement('button');
+        delBtn.className = 'btn secondary';
+        delBtn.textContent = 'Borrar';
+        delBtn.addEventListener('click', function () { openDatasetForm('delete', d); });
+        actions.appendChild(editBtn);
+        actions.appendChild(delBtn);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      body.appendChild(table);
     },
     snapshots: function (body, data) {
-      var html = '<h2 style="font-size:14px">Snapshots</h2>';
       body.className = '';
-      body.innerHTML = html;
-      var snapDiv = document.createElement('div');
-      body.appendChild(snapDiv);
-      renderSimpleTable(snapDiv, data.snapshots, [
-        ['Nombre', function (s) { return s.name || s.id; }],
-        ['Dataset', function (s) { return s.dataset || ''; }],
-        ['Creado', function (s) { return (s.properties && s.properties.creation && s.properties.creation.parsed) || ''; }],
-      ]);
+      body.innerHTML = '<h2 style="font-size:14px">Snapshots</h2>';
+      var snapWrap = document.createElement('div');
+      body.appendChild(snapWrap);
+      var items = data.snapshots || [];
+      if (!items.length) {
+        snapWrap.className = 'empty';
+        snapWrap.textContent = 'Sin snapshots.';
+      } else {
+        var table = document.createElement('table');
+        table.innerHTML = '<thead><tr><th>Nombre</th><th>Dataset</th><th>Creado</th><th></th></tr></thead>';
+        var tbody = document.createElement('tbody');
+        items.forEach(function (s) {
+          var tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td>' + esc(s.name || s.id) + '</td>' +
+            '<td>' + esc(s.dataset || '') + '</td>' +
+            '<td>' + esc((s.properties && s.properties.creation && s.properties.creation.parsed) || '') + '</td>' +
+            '<td class="row-actions"></td>';
+          var delBtn = document.createElement('button');
+          delBtn.className = 'btn secondary';
+          delBtn.textContent = 'Borrar';
+          delBtn.addEventListener('click', function () { openSnapshotForm('delete', s); });
+          tr.querySelector('td:last-child').appendChild(delBtn);
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        snapWrap.appendChild(table);
+      }
       var tasksDiv = document.createElement('div');
       tasksDiv.innerHTML = '<h2 style="font-size:14px;margin-top:16px">Tareas periódicas</h2>';
       body.appendChild(tasksDiv);
@@ -676,6 +775,200 @@
       ]);
     },
   };
+
+  // -------------------------------------------------------------------
+  // F2: write flows — datasets/snapshots create/update/delete. Every
+  // write is: form -> "Vista previa" (dry-run, shows the EXACT method +
+  // params that will run, never executes) -> "Confirmar y ejecutar"
+  // (enabled immediately for create/update; for delete, only once the
+  // typed confirmation field matches the resource's full name exactly,
+  // mirroring the server-side guard so the UI never promises a delete the
+  // API would refuse anyway).
+  // -------------------------------------------------------------------
+
+  function writesDryRun(subsystem, op, payload) {
+    return api('writes/dry-run', { method: 'POST', body: { subsystem: subsystem, op: op, payload: payload } });
+  }
+
+  function writesExecute(instanceId, subsystem, op, payload) {
+    return api('writes/execute', {
+      method: 'POST',
+      body: { instance_id: instanceId, subsystem: subsystem, op: op, payload: payload },
+    });
+  }
+
+  function invalidateAndRefetch(tab) {
+    delete state.loadedTabs[tab + '::' + state.selectedInstance];
+    refreshTab(tab);
+  }
+
+  // -- Dataset write form -------------------------------------------------
+
+  var datasetWrite = { op: null, datasetId: null };
+
+  function openDatasetForm(op, row) {
+    datasetWrite = { op: op, datasetId: row ? (row.id || row.name) : null };
+    document.getElementById('dataset-write-card').hidden = false;
+    document.getElementById('dataset-write-title').textContent =
+      op === 'create' ? 'Nuevo dataset' : (op === 'update' ? 'Editar: ' : 'Borrar: ') +
+        (datasetWrite.datasetId || '');
+    document.getElementById('dataset-write-name-field').hidden = op !== 'create';
+    document.getElementById('dataset-write-changes-field').hidden = op === 'delete';
+    document.getElementById('dataset-write-confirm-field').hidden = op !== 'delete';
+    document.getElementById('dsw-name').value = '';
+    document.getElementById('dsw-changes').value = '';
+    document.getElementById('dsw-confirm').value = '';
+    document.getElementById('dataset-write-preview').textContent = '';
+    document.getElementById('dataset-write-result').textContent = '';
+    document.getElementById('btn-dataset-confirm').disabled = (op !== 'update');
+  }
+
+  function closeDatasetForm() {
+    document.getElementById('dataset-write-card').hidden = true;
+    datasetWrite = { op: null, datasetId: null };
+  }
+
+  function parseJsonField(raw, fallback) {
+    if (!raw || !raw.trim()) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function datasetPayload() {
+    if (datasetWrite.op === 'create') {
+      var payload = { name: document.getElementById('dsw-name').value.trim() };
+      var extra = parseJsonField(document.getElementById('dsw-changes').value, {});
+      for (var k in extra) { payload[k] = extra[k]; }
+      return payload;
+    }
+    if (datasetWrite.op === 'update') {
+      return {
+        dataset_id: datasetWrite.datasetId,
+        changes: parseJsonField(document.getElementById('dsw-changes').value, {}),
+      };
+    }
+    return {
+      dataset_id: datasetWrite.datasetId,
+      confirm_name: document.getElementById('dsw-confirm').value.trim(),
+    };
+  }
+
+  document.getElementById('btn-new-dataset').addEventListener('click', function () {
+    openDatasetForm('create', null);
+  });
+  document.getElementById('btn-dataset-cancel').addEventListener('click', closeDatasetForm);
+  document.getElementById('dsw-confirm').addEventListener('input', function () {
+    document.getElementById('btn-dataset-confirm').disabled =
+      this.value.trim() !== datasetWrite.datasetId;
+  });
+  document.getElementById('btn-dataset-preview').addEventListener('click', function () {
+    var out = document.getElementById('dataset-write-preview');
+    out.textContent = 'Consultando…';
+    writesDryRun('datasets', datasetWrite.op, datasetPayload()).then(function (res) {
+      if (res.status !== 200) {
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+        return;
+      }
+      out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+  });
+  document.getElementById('btn-dataset-confirm').addEventListener('click', function () {
+    var out = document.getElementById('dataset-write-result');
+    out.textContent = 'Ejecutando…';
+    writesExecute(state.selectedInstance, 'datasets', datasetWrite.op, datasetPayload())
+      .then(function (res) {
+        if (res.status >= 400) {
+          out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+          return;
+        }
+        out.textContent = 'Resultado: ' + res.data.status +
+          (res.data.job_id ? ' (job_id=' + res.data.job_id + ')' : '');
+        if (res.data.status === 'ok') {
+          closeDatasetForm();
+          invalidateAndRefetch('datasets');
+        }
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+  });
+
+  // -- Snapshot write form --------------------------------------------------
+
+  var snapshotWrite = { op: null, snapshotId: null };
+
+  function openSnapshotForm(op, row) {
+    snapshotWrite = { op: op, snapshotId: row ? (row.id || row.name) : null };
+    document.getElementById('snapshot-write-card').hidden = false;
+    document.getElementById('snapshot-write-title').textContent =
+      op === 'create' ? 'Nuevo snapshot' : 'Borrar: ' + (snapshotWrite.snapshotId || '');
+    document.getElementById('snapshot-create-fields').hidden = op !== 'create';
+    document.getElementById('snapshot-recursive-field').hidden = op !== 'create';
+    document.getElementById('snapshot-write-confirm-field').hidden = op !== 'delete';
+    document.getElementById('ssw-dataset').value = '';
+    document.getElementById('ssw-name').value = '';
+    document.getElementById('ssw-recursive').checked = false;
+    document.getElementById('ssw-confirm').value = '';
+    document.getElementById('snapshot-write-preview').textContent = '';
+    document.getElementById('snapshot-write-result').textContent = '';
+    document.getElementById('btn-snapshot-confirm').disabled = (op !== 'create');
+  }
+
+  function closeSnapshotForm() {
+    document.getElementById('snapshot-write-card').hidden = true;
+    snapshotWrite = { op: null, snapshotId: null };
+  }
+
+  function snapshotPayload() {
+    if (snapshotWrite.op === 'create') {
+      return {
+        dataset: document.getElementById('ssw-dataset').value.trim(),
+        name: document.getElementById('ssw-name').value.trim(),
+        recursive: document.getElementById('ssw-recursive').checked,
+      };
+    }
+    return {
+      snapshot_id: snapshotWrite.snapshotId,
+      confirm_name: document.getElementById('ssw-confirm').value.trim(),
+    };
+  }
+
+  document.getElementById('btn-new-snapshot').addEventListener('click', function () {
+    openSnapshotForm('create', null);
+  });
+  document.getElementById('btn-snapshot-cancel').addEventListener('click', closeSnapshotForm);
+  document.getElementById('ssw-confirm').addEventListener('input', function () {
+    document.getElementById('btn-snapshot-confirm').disabled =
+      this.value.trim() !== snapshotWrite.snapshotId;
+  });
+  document.getElementById('btn-snapshot-preview').addEventListener('click', function () {
+    var out = document.getElementById('snapshot-write-preview');
+    out.textContent = 'Consultando…';
+    writesDryRun('snapshots', snapshotWrite.op, snapshotPayload()).then(function (res) {
+      if (res.status !== 200) {
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+        return;
+      }
+      out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+  });
+  document.getElementById('btn-snapshot-confirm').addEventListener('click', function () {
+    var out = document.getElementById('snapshot-write-result');
+    out.textContent = 'Ejecutando…';
+    writesExecute(state.selectedInstance, 'snapshots', snapshotWrite.op, snapshotPayload())
+      .then(function (res) {
+        if (res.status >= 400) {
+          out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+          return;
+        }
+        out.textContent = 'Resultado: ' + res.data.status +
+          (res.data.job_id ? ' (job_id=' + res.data.job_id + ')' : '');
+        if (res.data.status === 'ok') {
+          closeSnapshotForm();
+          invalidateAndRefetch('snapshots');
+        }
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+  });
 
   loadConfig();
 })();

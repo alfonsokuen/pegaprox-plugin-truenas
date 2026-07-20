@@ -6,12 +6,37 @@ is deprecated in 25.10 and removed in TrueNAS 26, so this plugin never uses
 it. See `PEGAPROX_PLUGIN_TRUENAS_BRIEF.md` (in the workspace, not this repo)
 for the full architecture, phase plan and known gotchas.
 
-**This is F1 (v0.2.0): full read-only monitoring**, on top of the F0
-transport layer/config/UI shell — verified live against the real `.64`
-instance (login + `system.info` + `alert.list` + `pool.query`). Every tab
-(Overview/Pools & Discos/Datasets/Snapshots/Shares/Replicación/Apps-VMs/
-Settings) now shows real data. No writes anywhere yet — create/update/
-delete on any subsystem is F2+.
+**This is F2 (v0.3.0): first real writes** — datasets/zvols and snapshots
+create/update/delete, on top of F1's read-only monitoring (verified live
+against the real `.64` instance) and F0's transport layer/config/UI shell.
+Every other subsystem (pools, shares, replication, apps/VMs, system)
+remains read-only until its own write phase (F3+ per the brief's phase
+table). Built entirely with fakes/mocks — no real key, no real call
+against any instance in this repo's tests or code; the operator connects
+`svc-pegaprox-rw` and runs the first live write separately after review.
+
+## What's in F2 (on top of F1)
+
+- **Write path** (`src/subsystems/datasets.py`, `snapshots.py`):
+  `create`/`update`/`delete` (datasets) and `create`/`delete` (snapshots),
+  each split into a pure `build_<op>_envelope(...)` (no `conn` — returns
+  `(method, params)` or raises) and a real op that calls that SAME
+  builder. `POST writes/dry-run` / `POST writes/execute` (both admin-gated)
+  share this registry (`WRITE_OPS` in `src/routes/api.py`) so a dry-run
+  preview can never describe a different call than what actually runs.
+- **Typed confirmation on delete**: `confirm_name` must match the
+  resource's full name/id exactly, checked inside the builder — before
+  any envelope exists, let alone before any TrueNAS call.
+- **`ConnectionManager.get_rw_connection()`**: separately cached from the
+  read-only client — a write never upgrades the shared read connection's
+  privilege.
+- **`_resolve_writable_instance`**: `readonly is False` + `api_key_rw`
+  present, both required before anything else happens.
+- **Post-write verify + audit**, every outcome (`ok`/`pending`/
+  `verify_failed`/`error`) logged, never auto-retried.
+- See `CHANGELOG.md` `[0.3.0]` for the full write-flow detail and the
+  sync-vs-async design decision (unconfirmed without live access — designed
+  conservatively per this phase's explicit instruction).
 
 ## What's in F1 (on top of F0)
 
@@ -151,14 +176,21 @@ top, see above.)
   the only instance this plugin talks to. Add it if/when a future instance
   proves `vm.query` errors and `virt.instance.query` answers instead.
 
-## Pendiente de F1-deploy / F2+ (explicitly out of scope here)
+## Pendiente de F2-deploy / F3+ (explicitly out of scope here)
 
 - **`websocket-client` vendoring.** CT119 has no external DNS/internet
   access. `requirements.txt` declares the dependency, but making it
   available offline (vendored into the plugin's cache dir, or pre-installed
   from a LAN-reachable mirror) is deploy work, not build work.
-- No writers on any subsystem (create/update/delete) — F2+ per the brief's
-  phase table, behind the dry-run/confirm/audit write-path (brief §5).
+- **The real `svc-pegaprox-rw` account and the first live write against
+  `.64`** — both require explicit operator confirmation in a separate
+  session (brief §0.5), same order as F0/F1: build with fakes → review →
+  operator verifies live.
+- No writers on pools/shares/replication/apps-vms/system — F3+ per the
+  brief's phase table, behind the same dry-run/confirm/audit write-path.
+- No job poller — an async create/delete (if TrueNAS 25.10.1 turns out to
+  wrap these in a job) is reported as `pending` with a re-check path, not
+  actively polled to completion.
 - No `check_cluster_access` per-client RBAC — admin-only gate until a second
   real client (SACEI/INGESA/GeoSpace) is on-boarded.
 - No installation on CT119, no connection to any instance besides `.64` —

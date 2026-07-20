@@ -56,6 +56,25 @@ class ReadOnlySubsystem(Exception):
             f"subsystem '{subsystem_id}' has no write support in this phase")
 
 
+class ConfirmationRequired(Exception):
+    """Raised by a destructive write's envelope builder (F2+) when the
+    caller-supplied ``confirm_name`` doesn't match the resource's full
+    name/id — the brief §5 step 2 GitHub-style typed-confirmation guard.
+
+    Deliberately raised from inside the SAME builder function that also
+    constructs the JSON-RPC envelope for both dry-run and real execution
+    (never a separate check bolted on afterward) — this is what guarantees
+    a delete can never be dry-run'd or executed without the confirmation
+    having been validated first, in exactly one place.
+    """
+
+    def __init__(self, expected, got):
+        super().__init__(
+            f"confirmation mismatch: expected {expected!r}, got {got!r}")
+        self.expected = expected
+        self.got = got
+
+
 @dataclass
 class HealthReport:
     """Uniform health summary a subsystem can report for the Overview tab.

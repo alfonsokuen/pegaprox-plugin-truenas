@@ -451,3 +451,369 @@ def test_apps_vms_handler_returns_apps_and_vms(plugin, tmp_plugin_dir, monkeypat
     _, payload = resp
     assert payload['data'] == {'apps': [{'name': 'plex'}], 'apps_error': None,
                                 'vms': [], 'vms_error': None}
+
+
+# ---------------------------------------------------------------------------
+# F2: write path (brief §5) — dry-run vs execute MUST use the identical
+# builder (never diverge), readonly/api_key_rw gates, typed confirmation,
+# post-write verify (ok/pending/verify_failed), audit.
+# ---------------------------------------------------------------------------
+
+def _writable_instance(plugin_dir_cfg_path, **overrides):
+    defaults = {'readonly': False, 'api_key_rw': 'real-secret-rw'}
+    defaults.update(overrides)
+    return _seed_instance(plugin_dir_cfg_path, **defaults)
+
+
+def test_writes_dry_run_returns_method_and_params_without_touching_conn_manager(
+        plugin, tmp_plugin_dir, monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError('dry-run must never touch conn_manager')
+
+    monkeypatch.setattr(routes_api.conn_manager, 'get_connection', boom)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', boom)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset', 'type': 'FILESYSTEM'},
+    })
+    resp = routes_api.writes_dry_run_handler()
+    _, payload = resp
+    assert payload['method'] == 'pool.dataset.create'
+    assert payload['params'] == [{'name': 'tank/test-dataset', 'type': 'FILESYSTEM'}]
+
+
+def test_writes_dry_run_rejects_unknown_op(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'datasets', 'op': 'frobnicate', 'payload': {},
+    })
+    resp, status = routes_api.writes_dry_run_handler()
+    assert status == 400
+
+
+def test_writes_dry_run_dataset_delete_confirmation_mismatch_400(
+        plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'datasets', 'op': 'delete',
+        'payload': {'dataset_id': 'tank/test-dataset', 'confirm_name': 'tank/wrong'},
+    })
+    resp, status = routes_api.writes_dry_run_handler()
+    assert status == 400
+    _, payload = resp
+    assert 'confirmation mismatch' in payload['error']
+
+
+def test_writes_dry_run_and_execute_use_identical_builder(plugin, tmp_plugin_dir, monkeypatch):
+    """The core anti-divergence guarantee: for the SAME payload, dry-run's
+    (method, params) must be byte-for-byte identical to what execute
+    actually calls conn.call() with."""
+    _writable_instance(routes_api.CONFIG_PATH)
+    dry_run_payload = {
+        'subsystem': 'snapshots', 'op': 'create',
+        'payload': {'dataset': 'tank/test-dataset', 'name': 'snap1'},
+    }
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: dry_run_payload)
+    dry_resp = routes_api.writes_dry_run_handler()
+    _, dry_payload = dry_resp
+
+    fake_conn = FakeConn({'pool.snapshot.create': {'id': 'tank/test-dataset@snap1'}})
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.snapshots_subsystem, 'read',
+                         lambda conn, id: {'id': id})  # verify: pretend it now exists
+    execute_body = dict(dry_run_payload)
+    execute_body['instance_id'] = 'truenas-test'
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: execute_body)
+    routes_api.writes_execute_handler()
+
+    method, params = fake_conn.calls[0]
+    assert method == dry_payload['method']
+    assert params == dry_payload['params']
+
+
+def test_writes_execute_requires_instance_id(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'datasets', 'op': 'create', 'payload': {'name': 'tank/test-dataset'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 400
+
+
+def test_writes_execute_403_when_instance_is_readonly(plugin, tmp_plugin_dir, monkeypatch):
+    _seed_instance(routes_api.CONFIG_PATH, readonly=True, api_key_rw='real-secret-rw')
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 403
+    _, payload = resp
+    assert 'readonly' in payload['error']
+
+
+def test_writes_execute_403_when_no_rw_key_configured(plugin, tmp_plugin_dir, monkeypatch):
+    _seed_instance(routes_api.CONFIG_PATH, readonly=False, api_key_rw=None)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 403
+    _, payload = resp
+    assert 'api_key_rw' in payload['error']
+
+
+def test_writes_execute_rejects_confirmation_mismatch_before_touching_conn(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+
+    def boom(inst):
+        raise AssertionError('must not connect when confirmation is invalid')
+
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', boom)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'delete',
+        'payload': {'dataset_id': 'tank/test-dataset', 'confirm_name': 'tank/wrong-name'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 400
+    _, payload = resp
+    assert 'confirmation mismatch' in payload['error']
+
+
+def test_writes_execute_dataset_create_success_verifies_and_audits(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': {'id': 'tank/test-dataset'}}, is_authenticated=False)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read',
+                         lambda conn, id: {'id': id} if id == 'tank/test-dataset' else None)
+    audited = []
+    monkeypatch.setattr(routes_api, 'log_audit',
+                         lambda **kw: audited.append(kw))
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset', 'type': 'FILESYSTEM'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['ok'] is True
+    assert payload['status'] == 'ok'
+    assert payload['method'] == 'pool.dataset.create'
+    assert fake_conn.login_calls == ['real-secret-rw']
+    assert len(audited) == 1
+    assert 'idkmanager' in audited[0]['details']  # client_id folded into details
+    assert 'truenas.datasets.create' == audited[0]['action']
+
+
+def test_writes_execute_reports_pending_when_job_id_and_verify_not_yet_matching(
+        plugin, tmp_plugin_dir, monkeypatch):
+    """Conservative design for the unresolved sync-vs-async question: an
+    int result + a verify that doesn't show the expected state yet must
+    report 'pending', never a false 'ok' or a false 'verify_failed'."""
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': 12345})  # looks like a job id
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read', lambda conn, id: None)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'pending'
+    assert payload['ok'] is False
+    assert payload['job_id'] == 12345
+
+
+def test_writes_execute_reports_verify_failed_when_no_job_id_and_verify_mismatch(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': {'id': 'tank/test-dataset'}}, is_authenticated=False)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    # The create call "succeeded" per TrueNAS but the dataset doesn't
+    # actually show up on re-read — a real, surfaced problem.
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read', lambda conn, id: None)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'verify_failed'
+    assert payload['ok'] is False
+
+
+def test_writes_execute_502_on_truenas_error_during_call(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': TrueNASConnectionError('appliance unreachable')})
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 502
+    _, payload = resp
+    assert payload['ok'] is False
+    assert 'appliance unreachable' in payload['error']
+
+
+def test_writes_execute_dataset_delete_success(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.delete': True})
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read', lambda conn, id: None)  # gone
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'delete',
+        'payload': {'dataset_id': 'tank/test-dataset', 'confirm_name': 'tank/test-dataset'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'ok'
+    assert payload['method'] == 'pool.dataset.delete'
+
+
+def test_writes_execute_uses_rw_connection_not_ro(plugin, tmp_plugin_dir, monkeypatch):
+    """Writes must go through get_rw_connection(), never get_connection()
+    (the shared read-only cache) — reusing the RO client for a write would
+    silently upgrade every subsequent read to an RW-privileged session."""
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': {'id': 'tank/test-dataset'}}, is_authenticated=False)
+    ro_conn_touched = {'value': False}
+
+    def fake_get_connection(inst):
+        ro_conn_touched['value'] = True
+        return fake_conn
+
+    monkeypatch.setattr(routes_api.conn_manager, 'get_connection', fake_get_connection)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read',
+                         lambda conn, id: {'id': id})
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    routes_api.writes_execute_handler()
+    assert ro_conn_touched['value'] is False
+    assert fake_conn.login_calls == ['real-secret-rw']
+
+
+def test_writes_execute_dataset_update_success(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.update': True}, is_authenticated=False)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read',
+                         lambda conn, id: {'id': id, 'volsize': 4096})
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'update',
+        'payload': {'dataset_id': 'tank/test-dataset',
+                    'changes': {'volsize': 4096, 'force_size': True}},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'ok'
+    assert payload['method'] == 'pool.dataset.update'
+    method, params = fake_conn.calls[0]
+    assert params == ['tank/test-dataset', {'volsize': 4096, 'force_size': True}]
+
+
+def test_writes_execute_snapshot_delete_success(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.snapshot.delete': True}, is_authenticated=False)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.snapshots_subsystem, 'read', lambda conn, id: None)  # gone
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'snapshots', 'op': 'delete',
+        'payload': {'snapshot_id': 'tank/test-dataset@snap1',
+                    'confirm_name': 'tank/test-dataset@snap1'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'ok'
+    assert payload['method'] == 'pool.snapshot.delete'
+
+
+def test_writes_execute_snapshot_delete_confirmation_mismatch(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+
+    def boom(inst):
+        raise AssertionError('must not connect when confirmation is invalid')
+
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', boom)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'snapshots', 'op': 'delete',
+        'payload': {'snapshot_id': 'tank/test-dataset@snap1', 'confirm_name': 'wrong'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 400
+
+
+def test_writes_execute_reports_unexpected_error_as_500(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+
+    def boom(inst):
+        raise ValueError('a genuine bug, not a TrueNAS error')
+
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', boom)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 500
+    _, payload = resp
+    assert payload['ok'] is False
+
+
+def test_writes_execute_verify_error_reports_verify_failed_not_a_crash(
+        plugin, tmp_plugin_dir, monkeypatch):
+    """A TrueNASError during the post-write verify read must not crash the
+    route — the write itself already succeeded per TrueNAS; verify just
+    couldn't confirm it, which is exactly 'verify_failed'."""
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({'pool.dataset.create': {'id': 'tank/test-dataset'}},
+                         is_authenticated=False)
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+
+    def verify_boom(conn, id):
+        raise TrueNASConnectionError('verify read timed out')
+
+    monkeypatch.setattr(routes_api.datasets_subsystem, 'read', verify_boom)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'create',
+        'payload': {'name': 'tank/test-dataset'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['status'] == 'verify_failed'
+    assert payload['ok'] is False
+
+
+def test_writes_execute_unknown_op_400(plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'datasets', 'op': 'frobnicate',
+        'payload': {},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 400
+
+
+def test_writes_dry_run_rejects_malformed_json_body(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: None)
+    resp, status = routes_api.writes_dry_run_handler()
+    assert status == 400
+
+
+def test_writes_execute_rejects_malformed_json_body(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: None)
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 400
+
+
+def test_writes_dry_run_dataset_update_validation_error(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'datasets', 'op': 'update',
+        'payload': {'dataset_id': 'tank/test-dataset', 'changes': {}},
+    })
+    resp, status = routes_api.writes_dry_run_handler()
+    assert status == 400

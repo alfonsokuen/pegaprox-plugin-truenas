@@ -25,11 +25,28 @@ class ConnectionManager:
         self._lock = threading.Lock()
 
     def get_connection(self, instance_cfg):
-        """Return the (lazily created) client for ``instance_cfg``. Does NOT
-        connect — connection happens lazily on the client's first ``call()``."""
-        instance_id = instance_cfg['id']
+        """Return the (lazily created) READ-ONLY client for ``instance_cfg``.
+        Does NOT connect — connection happens lazily on the client's first
+        ``call()``. Logged in with ``api_key_ro`` only (see routes/api.py's
+        ``_get_authenticated_connection``) — never call ``.login()`` on this
+        client with the RW key, or every subsequent "read-only" request
+        would silently reuse an RW-privileged session. Use
+        ``get_rw_connection()`` for writes; it is a SEPARATE cached client
+        specifically so a write never upgrades the shared read connection's
+        privilege level."""
+        return self._get_or_create(instance_cfg['id'], instance_cfg)
+
+    def get_rw_connection(self, instance_cfg):
+        """Return the (lazily created) client dedicated to WRITE operations
+        for ``instance_cfg`` — cached separately from ``get_connection()``'s
+        read-only client (brief §3: minimum privilege in runtime). Logging
+        in here with ``api_key_rw`` must never touch the RO client's cache
+        entry, and vice versa."""
+        return self._get_or_create(f"{instance_cfg['id']}::rw", instance_cfg)
+
+    def _get_or_create(self, cache_key, instance_cfg):
         with self._lock:
-            client = self._clients.get(instance_id)
+            client = self._clients.get(cache_key)
             if client is None:
                 client = self._client_factory(
                     host=instance_cfg['host'],
@@ -38,7 +55,7 @@ class ConnectionManager:
                     verify_tls=instance_cfg.get('verify_tls', False),
                     tls_server_name=instance_cfg.get('tls_server_name'),
                 )
-                self._clients[instance_id] = client
+                self._clients[cache_key] = client
             return client
 
     def is_connected(self, instance_id):
@@ -90,10 +107,17 @@ class ConnectionManager:
                 pass
 
     def close(self, instance_id):
+        """Closes BOTH the RO and RW clients for ``instance_id`` — a
+        config change invalidating one key almost always invalidates both
+        (host/port/TLS changed), and leaving a stale RW client connected
+        while the RO one gets dropped would be a confusing half-reset."""
         with self._lock:
-            client = self._clients.pop(instance_id, None)
-        if client:
-            client.close()
+            ro_client = self._clients.pop(instance_id, None)
+            rw_client = self._clients.pop(f'{instance_id}::rw', None)
+        if ro_client:
+            ro_client.close()
+        if rw_client:
+            rw_client.close()
 
     def close_all(self):
         with self._lock:

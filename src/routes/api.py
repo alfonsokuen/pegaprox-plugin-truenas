@@ -30,6 +30,8 @@ only require ``storage.view`` — they never see a key, only a subsystem's
 read-only JSON-RPC results.
 """
 
+import hashlib
+import json
 import logging
 import os
 
@@ -41,7 +43,9 @@ from pegaprox.utils.audit import log_audit
 
 from core.conn_manager import ConnectionManager
 from core.errors import TrueNASAuthError, TrueNASError
-from core.subsystem import safe_call
+from core.subsystem import ConfirmationRequired, safe_call
+import subsystems.datasets as datasets_mod
+import subsystems.snapshots as snapshots_mod
 from subsystems.apps_vms import apps_vms as apps_vms_subsystem
 from subsystems.datasets import datasets as datasets_subsystem
 from subsystems.pools import list_disks as pools_list_disks
@@ -377,6 +381,292 @@ def apps_vms_handler():
 
 
 # ---------------------------------------------------------------------------
+# F2: write path (brief §5) — datasets/snapshots create/update/delete.
+#
+# Every op is registered ONCE in WRITE_OPS as a (build, execute, verify)
+# triple. ``writes/dry-run`` calls ONLY ``build`` (no ``conn`` parameter at
+# all — not a convention, a structural guarantee it cannot touch TrueNAS).
+# ``writes/execute`` calls the exact same ``build`` first (so validation —
+# including the typed-confirmation guard on deletes — happens identically
+# in both paths) and only then ``execute`` against a real, RW-authenticated
+# connection. This is what makes it structurally impossible for a dry-run
+# preview to describe a different JSON-RPC call than what execute actually
+# runs — the alternative (building the envelope twice, once per path) is
+# exactly the kind of trap that silently desyncs over time.
+#
+# Sync-vs-async (documented, unresolved without live access — see
+# datasets.py's module docstring): every ``execute`` result is treated as
+# POSSIBLY an int job id. The post-write verify (step 6) re-reads the
+# resource regardless; if verify doesn't yet show the expected state AND
+# the result was an int, this is reported as ``status: "pending"``
+# (genuinely unknown: job still running vs. actually failed) rather than
+# asserted as success or failure — no job poller is built in F2 (out of
+# scope per this phase), so "pending" comes with a re-check path (call the
+# same route again) instead of a false verdict either way (step 8: no
+# auto-retry, real status + a way to re-check).
+# ---------------------------------------------------------------------------
+
+def _dataset_create_build(payload):
+    return datasets_mod.build_create_envelope(payload)
+
+
+def _dataset_create_execute(conn, payload):
+    return datasets_mod.create(conn, payload)
+
+
+def _verify_dataset_created(conn, payload, result):
+    found = datasets_subsystem.read(conn, payload.get('name'))
+    return found is not None, found
+
+
+def _dataset_update_build(payload):
+    return datasets_mod.build_update_envelope(payload.get('dataset_id'), payload.get('changes') or {})
+
+
+def _dataset_update_execute(conn, payload):
+    return datasets_mod.update(conn, payload.get('dataset_id'), payload.get('changes') or {})
+
+
+def _verify_dataset_updated(conn, payload, result):
+    found = datasets_subsystem.read(conn, payload.get('dataset_id'))
+    return found is not None, found
+
+
+def _dataset_delete_build(payload):
+    return datasets_mod.build_delete_envelope(
+        payload.get('dataset_id'), payload.get('confirm_name'), payload.get('options'))
+
+
+def _dataset_delete_execute(conn, payload):
+    return datasets_mod.delete(
+        conn, payload.get('dataset_id'), payload.get('confirm_name'), payload.get('options'))
+
+
+def _verify_dataset_deleted(conn, payload, result):
+    found = datasets_subsystem.read(conn, payload.get('dataset_id'))
+    return found is None, found
+
+
+def _snapshot_create_build(payload):
+    return snapshots_mod.build_create_envelope(
+        payload.get('dataset'), payload.get('name'), payload.get('recursive', False))
+
+
+def _snapshot_create_execute(conn, payload):
+    return snapshots_mod.create(
+        conn, payload.get('dataset'), payload.get('name'), payload.get('recursive', False))
+
+
+def _verify_snapshot_created(conn, payload, result):
+    expected_id = f"{payload.get('dataset')}@{payload.get('name')}"
+    found = snapshots_subsystem.read(conn, expected_id)
+    return found is not None, found
+
+
+def _snapshot_delete_build(payload):
+    return snapshots_mod.build_delete_envelope(payload.get('snapshot_id'), payload.get('confirm_name'))
+
+
+def _snapshot_delete_execute(conn, payload):
+    return snapshots_mod.delete(conn, payload.get('snapshot_id'), payload.get('confirm_name'))
+
+
+def _verify_snapshot_deleted(conn, payload, result):
+    found = snapshots_subsystem.read(conn, payload.get('snapshot_id'))
+    return found is None, found
+
+
+WRITE_OPS = {
+    ('datasets', 'create'): {
+        'build': _dataset_create_build, 'execute': _dataset_create_execute,
+        'verify': _verify_dataset_created,
+    },
+    ('datasets', 'update'): {
+        'build': _dataset_update_build, 'execute': _dataset_update_execute,
+        'verify': _verify_dataset_updated,
+    },
+    ('datasets', 'delete'): {
+        'build': _dataset_delete_build, 'execute': _dataset_delete_execute,
+        'verify': _verify_dataset_deleted,
+    },
+    ('snapshots', 'create'): {
+        'build': _snapshot_create_build, 'execute': _snapshot_create_execute,
+        'verify': _verify_snapshot_created,
+    },
+    ('snapshots', 'delete'): {
+        'build': _snapshot_delete_build, 'execute': _snapshot_delete_execute,
+        'verify': _verify_snapshot_deleted,
+    },
+}
+
+
+def _params_hash(params):
+    """Short, stable hash of the JSON-RPC params for compact audit entries
+    — the raw payload can carry dataset properties/quotas that don't
+    belong bloating the audit log, but a hash still lets an operator
+    correlate 'this exact call' across the dry-run preview and the audit
+    trail."""
+    encoded = json.dumps(params, sort_keys=True, default=str).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def _resolve_writable_instance(instance_id):
+    """Like ``_resolve_instance``, but for the write path: the instance
+    must exist, must NOT be in readonly mode, and must have ``api_key_rw``
+    configured — ALL checked before any envelope is even built, let alone
+    before touching TrueNAS. ``readonly`` is the server-side kill-switch
+    (brief §3) and is the final authority no matter what the UI shows."""
+    if not instance_id:
+        return None, (jsonify({'error': 'instance_id is required'}), 400)
+    cfg = config_store.load_config(CONFIG_PATH)
+    inst = config_store.find_instance(cfg['instances'], instance_id)
+    if not inst:
+        return None, (jsonify({'error': f"instance '{instance_id}' not found"}), 404)
+    if inst.get('readonly', True):
+        return None, (jsonify({
+            'error': f"instance '{instance_id}' is in readonly mode — writes "
+                     f"are disabled server-side"}), 403)
+    if not inst.get('api_key_rw'):
+        return None, (jsonify({
+            'error': f"instance '{instance_id}' has no api_key_rw configured — "
+                     f"writes are disabled"}), 403)
+    return inst, None
+
+
+def _get_rw_authenticated_connection(inst):
+    """Mirrors ``_get_authenticated_connection`` but against the SEPARATE
+    RW-privileged connection (``conn_manager.get_rw_connection``) — writes
+    must never upgrade the shared read connection's privilege level."""
+    conn = conn_manager.get_rw_connection(inst)
+    if conn.needs_auth:
+        raise TrueNASAuthError('auth.login_with_api_key', {
+            'message': 'RW API key was rejected on a previous attempt — '
+                       'check/rotate it in Settings before retrying'})
+    if not conn.is_authenticated:
+        conn.login(inst['api_key_rw'])
+    return conn
+
+
+def writes_dry_run_handler():
+    """POST body: ``{subsystem, op, payload}``. Returns ``{method, params}``
+    WITHOUT ever touching TrueNAS or even resolving a connection — the
+    builder functions take no ``conn`` argument at all."""
+    if (err := _require_admin()):
+        return err
+    raw_body = request.get_json(silent=True)
+    if raw_body is None:
+        return jsonify({'error': 'request body must be valid JSON'}), 400
+    body = raw_body if isinstance(raw_body, dict) else {}
+    subsystem = str(body.get('subsystem') or '')
+    op = str(body.get('op') or '')
+    payload = body.get('payload') or {}
+
+    op_entry = WRITE_OPS.get((subsystem, op))
+    if not op_entry:
+        return jsonify({'error': f"unknown write operation '{subsystem}.{op}'"}), 400
+
+    try:
+        method, params = op_entry['build'](payload)
+    except ConfirmationRequired as e:
+        return jsonify({'error': str(e)}), 400
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'method': method, 'params': params})
+
+
+def writes_execute_handler():
+    """POST body: ``{instance_id, subsystem, op, payload}``. Runs the full
+    brief §5 write flow: admin gate -> writable-instance gate (readonly +
+    api_key_rw) -> build envelope (validates, incl. typed confirmation) ->
+    RW connect+login -> call() -> post-write verify -> audit -> response.
+    Never retries automatically on a step 5/6 failure (step 8) — the
+    response always carries the real observed status so the operator can
+    decide whether to re-check or retry from the UI."""
+    if (err := _require_admin()):
+        return err
+    raw_body = request.get_json(silent=True)
+    if raw_body is None:
+        return jsonify({'error': 'request body must be valid JSON'}), 400
+    body = raw_body if isinstance(raw_body, dict) else {}
+    instance_id = str(body.get('instance_id') or '').strip()
+    subsystem = str(body.get('subsystem') or '')
+    op = str(body.get('op') or '')
+    payload = body.get('payload') or {}
+
+    op_entry = WRITE_OPS.get((subsystem, op))
+    if not op_entry:
+        return jsonify({'error': f"unknown write operation '{subsystem}.{op}'"}), 400
+
+    inst, err_resp = _resolve_writable_instance(instance_id)
+    if err_resp:
+        return err_resp
+
+    try:
+        method, params = op_entry['build'](payload)
+    except ConfirmationRequired as e:
+        return jsonify({'error': str(e)}), 400
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    client_id = inst.get('client_id', 'unassigned')
+    params_hash = _params_hash(params)
+
+    def _audit(result_status, extra=''):
+        log_audit(user=_username(), action=f'truenas.{subsystem}.{op}',
+                  details=(f"instance={instance_id} client={client_id} method={method} "
+                           f"params_hash={params_hash} result={result_status}{extra}"))
+
+    try:
+        conn = _get_rw_authenticated_connection(inst)
+        result = op_entry['execute'](conn, payload)
+    except TrueNASError as e:
+        log.warning(f"[{PLUGIN_ID}] write '{subsystem}.{op}' failed for "
+                    f"instance '{instance_id}': {e}")
+        _audit('error', f': {e}')
+        return jsonify({'ok': False, 'status': 'error', 'error': str(e),
+                        'method': method, 'params': params}), 502
+    except Exception as e:  # defensive: never let a write bug 500 mute
+        log.error(f"[{PLUGIN_ID}] unexpected error executing '{subsystem}.{op}' for "
+                  f"instance '{instance_id}': {e}", exc_info=True)
+        _audit('unexpected_error', f': {e}')
+        return jsonify({'ok': False, 'status': 'error', 'error': f'unexpected error: {e}',
+                        'method': method, 'params': params}), 500
+
+    job_id = result if isinstance(result, int) else None
+
+    # Post-write verify (brief §5 step 6). Its own failure is logged but
+    # does not change the response's error handling above — this call
+    # already succeeded per TrueNAS; a verify-read failure just means we
+    # can't confirm the outcome, reported as 'verify_failed' below.
+    verify_ok, verify_resource = None, None
+    try:
+        verify_ok, verify_resource = op_entry['verify'](conn, payload, result)
+    except TrueNASError as e:
+        log.warning(f"[{PLUGIN_ID}] post-write verify failed for '{subsystem}.{op}' on "
+                    f"instance '{instance_id}': {e}")
+
+    if verify_ok is True:
+        status = 'ok'
+    elif job_id is not None:
+        # Genuinely unknown whether this is an async job still running or
+        # an actual failure — no job poller in F2. Report 'pending', never
+        # a false success or failure (step 8).
+        status = 'pending'
+    else:
+        status = 'verify_failed'
+
+    _audit(status)
+    return jsonify({
+        'ok': status == 'ok',
+        'status': status,
+        'method': method,
+        'params': params,
+        'job_id': job_id,
+        'verify': verify_resource,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Route table
 # ---------------------------------------------------------------------------
 
@@ -392,4 +682,6 @@ ROUTES = {
     'shares': shares_handler,
     'replication': replication_handler,
     'apps_vms': apps_vms_handler,
+    'writes/dry-run': writes_dry_run_handler,
+    'writes/execute': writes_execute_handler,
 }

@@ -244,3 +244,73 @@ def test_test_connection_does_not_register_the_throwaway_client():
     assert len(created) == 1
     mgr.get_connection(_instance_cfg(id_='never-saved'))
     assert len(created) == 2
+
+
+# ---------------------------------------------------------------------------
+# F2: get_rw_connection() must be a SEPARATE cache from get_connection()'s
+# read-only client — a write must never upgrade the shared read
+# connection's privilege level (brief §3: minimum privilege in runtime).
+# ---------------------------------------------------------------------------
+
+def test_get_rw_connection_is_a_different_client_than_get_connection():
+    mgr = ConnectionManager(client_factory=lambda **kw: _FakeClient(**kw))
+    ro = mgr.get_connection(_instance_cfg())
+    rw = mgr.get_rw_connection(_instance_cfg())
+    assert ro is not rw
+
+
+def test_get_rw_connection_is_cached_and_reused_across_calls():
+    created = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+    rw1 = mgr.get_rw_connection(_instance_cfg())
+    rw2 = mgr.get_rw_connection(_instance_cfg())
+    assert rw1 is rw2
+    assert len(created) == 1
+
+
+def test_logging_in_the_rw_connection_does_not_affect_the_ro_connection():
+    mgr = ConnectionManager(client_factory=lambda **kw: _FakeClient(**kw))
+    ro = mgr.get_connection(_instance_cfg())
+    rw = mgr.get_rw_connection(_instance_cfg())
+    rw.connect()
+    rw.login('rw-key')
+    assert rw.logged_in_with == 'rw-key'
+    assert ro.logged_in_with is None  # the RO client was never touched
+
+
+def test_close_drops_both_ro_and_rw_clients_for_the_instance():
+    mgr = ConnectionManager(client_factory=lambda **kw: _FakeClient(**kw))
+    ro = mgr.get_connection(_instance_cfg())
+    rw = mgr.get_rw_connection(_instance_cfg())
+    ro.is_connected = True
+    rw.is_connected = True
+    mgr.close('truenas-test')
+    assert ro.close_called is True
+    assert rw.close_called is True
+    # Both must be genuinely gone from the registry, not just closed.
+    assert mgr.get_connection(_instance_cfg()) is not ro
+    assert mgr.get_rw_connection(_instance_cfg()) is not rw
+
+
+def test_close_all_also_closes_rw_clients():
+    clients = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        clients.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+    mgr.get_connection(_instance_cfg('a'))
+    mgr.get_rw_connection(_instance_cfg('a'))
+    for c in clients:
+        c.is_connected = True
+    mgr.close_all()
+    assert all(c.close_called for c in clients)
+    assert len(clients) == 2

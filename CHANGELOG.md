@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.3.0] - 2026-07-20
+
+F2 — first real writes: datasets/zvols and snapshots create/update/delete
+against `.64` (confirmed no longer production-critical), built entirely
+with fakes/mocks per this phase's hard safety guard — no real key, no
+real call against `.64` in this repo's own tests or code path; the
+operator connects the real `svc-pegaprox-rw` account and runs the first
+live write in a separate session after this passes review.
+
+- **Write-path (brief §5) implemented literally**: for every op, a pure
+  `build_<op>_envelope(...)` function (no `conn` parameter at all) returns
+  `(method, params)` or raises; the real `<op>(conn, ...)` function calls
+  that SAME builder before ever touching `conn`. `POST writes/dry-run`
+  calls only the builder; `POST writes/execute` calls the identical
+  builder first (so a bad typed confirmation 400s before any connection
+  is even opened) and then the real op. This is a structural guarantee,
+  not a convention: dry-run cannot describe a different JSON-RPC call than
+  what execute actually runs, because it is the same function call.
+- **`datasets.py`**: `create`/`update`/`delete` wrapping
+  `pool.dataset.create`/`update`/`delete`. `delete` requires
+  `confirm_name` to match the dataset's full path exactly (GitHub-style
+  typed confirmation) — checked inside the builder, before any TrueNAS
+  call is attempted.
+- **`snapshots.py`**: `create`/`delete` wrapping `pool.snapshot.create`/
+  `delete`, same typed-confirmation guard on delete (full `dataset@name`
+  snapshot id).
+- **`ConnectionManager.get_rw_connection()`**: a SEPARATE cached client
+  from `get_connection()`'s read-only one. Writes authenticate with
+  `api_key_rw` on this dedicated connection — the shared read connection
+  (used by every F1 tab) is never touched, so it can never get silently
+  upgraded to RW privilege by a write elsewhere. `close()`/`close_all()`
+  now drop both.
+- **`_resolve_writable_instance`**: existence + `readonly is False` +
+  `api_key_rw` present, ALL checked before an envelope is even built —
+  `readonly` (the F0 kill-switch) remains the final server-side authority
+  regardless of what the UI shows.
+- **Post-write verify (step 6) + no-auto-retry (step 8)**: every execute
+  re-reads the resource after the call and reports one of `ok` /
+  `pending` / `verify_failed` / `error` — never silently retried. Audit
+  (`log_audit`, same `details`-string pattern as F0's `client_id`
+  decision — see below) fires for every outcome, success or failure, with
+  a `params_hash` (sha256, truncated) instead of the raw payload so
+  dataset properties/quotas don't bloat the audit log.
+- **UI**: Datasets/Snapshots tabs gained create/edit/delete actions:
+  form → "Vista previa" (dry-run, shows the literal method+params) →
+  "Confirmar y ejecutar", which for delete stays disabled until the typed
+  confirmation field matches the resource's full name exactly — mirroring
+  the server-side guard so the UI never promises a delete the API would
+  refuse anyway.
+- **Sync-vs-async design decision (unresolved without live access, per
+  this phase's explicit instruction to design conservatively)**: whether
+  `pool.dataset.create`/`update`/`delete` and `pool.snapshot.create`/
+  `delete` are synchronous or job-wrapped in TrueNAS 25.10.1 was NOT
+  confirmed. Every write result is checked for `isinstance(result, int)`
+  (TrueNAS's convention for a job id); if verify doesn't yet show the
+  expected state and the result was an int, status is reported as
+  `pending` (genuinely unknown: job still running vs. actually failed),
+  never asserted as a false success or failure. No job poller is built —
+  out of scope per this phase — so `pending` comes with a re-check path
+  (call `writes/execute` again) rather than silent uncertainty.
+- 213 tests (up from 164), verified via `pytest --collect-only -q`. 94%
+  combined coverage on `core/`+`routes/`+`subsystems/` (every individual
+  module ≥91%). All write-path tests use fakes — zero real calls, zero
+  real dataset/pool names (fixtures use `tank/test-dataset`, never
+  `IDK_LOCAL` or any real `.64` identifier).
+
 ## [0.2.0] - 2026-07-20 (post-review hardening, round 3)
 
 Two independent reviews (code-reviewer + silent-failure-hunter) converged
