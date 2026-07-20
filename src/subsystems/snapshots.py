@@ -12,6 +12,7 @@ that module's docstring for the shared rationale (not repeated here).
 """
 
 from core.subsystem import ConfirmationRequired, Subsystem
+from core.ws_client import WRITE_TIMEOUT
 
 DEFAULT_RECURSIVE = False
 
@@ -56,7 +57,7 @@ def create(conn, dataset, name, recursive=DEFAULT_RECURSIVE):
     or int job id — see datasets.py's module docstring for the
     sync-vs-async caveat, identical here)."""
     method, params = build_create_envelope(dataset, name, recursive)
-    return conn.call(method, params)
+    return conn.call(method, params, timeout=WRITE_TIMEOUT)
 
 
 def delete(conn, snapshot_id, confirm_name):
@@ -64,7 +65,7 @@ def delete(conn, snapshot_id, confirm_name):
     builder) BEFORE any call reaches TrueNAS if ``confirm_name`` doesn't
     match ``snapshot_id`` exactly."""
     method, params = build_delete_envelope(snapshot_id, confirm_name)
-    return conn.call(method, params)
+    return conn.call(method, params, timeout=WRITE_TIMEOUT)
 
 
 class SnapshotsSubsystem(Subsystem):

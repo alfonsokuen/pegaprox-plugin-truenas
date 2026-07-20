@@ -23,9 +23,11 @@ class FakeConn:
         self.is_authenticated = is_authenticated
         self.needs_auth = needs_auth
         self.login_calls = []
+        self.timeouts = []  # per-call timeout kwarg, parallel to self.calls
 
     def call(self, method, params=None, timeout=None):
         self.calls.append((method, params))
+        self.timeouts.append(timeout)
         if method not in self.responses:
             raise AssertionError(f'FakeConn: no canned response configured for {method!r}')
         value = self.responses[method]

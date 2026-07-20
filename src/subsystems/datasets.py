@@ -39,6 +39,7 @@ import logging
 
 from core.errors import TrueNASError
 from core.subsystem import ConfirmationRequired, Subsystem
+from core.ws_client import WRITE_TIMEOUT
 
 log = logging.getLogger('plugin.truenas.subsystems.datasets')
 
@@ -111,13 +112,13 @@ def create(conn, payload):
     this method is job-wrapped in the target's TrueNAS version (not
     confirmed live this session — see module docstring)."""
     method, params = build_create_envelope(payload)
-    return conn.call(method, params)
+    return conn.call(method, params, timeout=WRITE_TIMEOUT)
 
 
 def update(conn, dataset_id, payload):
     """``pool.dataset.update``. Same result-shape caveat as ``create()``."""
     method, params = build_update_envelope(dataset_id, payload)
-    return conn.call(method, params)
+    return conn.call(method, params, timeout=WRITE_TIMEOUT)
 
 
 def delete(conn, dataset_id, confirm_name, options=None):
@@ -125,7 +126,7 @@ def delete(conn, dataset_id, confirm_name, options=None):
     builder) BEFORE any call reaches TrueNAS if ``confirm_name`` doesn't
     match ``dataset_id`` exactly."""
     method, params = build_delete_envelope(dataset_id, confirm_name, options)
-    return conn.call(method, params)
+    return conn.call(method, params, timeout=WRITE_TIMEOUT)
 
 
 class DatasetsSubsystem(Subsystem):

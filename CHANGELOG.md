@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.1] - 2026-07-20 (QA fable pre-flight — before the first real write against `.64`)
+
+A third QA pass (qa-auditor + silent-failure-hunter, both on Fable, as a
+final gate specifically for touching real infrastructure for the first
+time) reconfirmed the round-2 fixes are genuinely in the code, ran the
+suite/linter independently, and found one non-blocking gap worth closing
+before real credentials touch `.64`.
+
+- **Writes now use a 60s timeout (`WRITE_TIMEOUT`), not the 10s read
+  default.** A real ZFS write (recursive delete, encrypted/dedup create)
+  can legitimately take longer than any read; reusing `DEFAULT_TIMEOUT`
+  for writes risked a `TrueNASTimeoutError` reported as `'error'` while
+  the write was still genuinely in flight on TrueNAS's side — with no
+  poller in F2, an operator retrying a `create` on a false timeout could
+  collide with the write that actually succeeded. `datasets.py`/
+  `snapshots.py`'s `create`/`update`/`delete` now pass
+  `timeout=WRITE_TIMEOUT` explicitly.
+- **A late response arriving after its caller already timed out is now
+  logged at `warning`, not `debug`, whenever it carries a `result` or an
+  `error`.** That frame is the only evidence of whether a timed-out write
+  actually landed on TrueNAS; dropping it at debug level the same as any
+  harmless late ack made that outcome invisible. A late ack with neither
+  key stays at debug — no new noise for the common case.
+- 242 tests (up from 235), ruff clean. Both reviews' verdict: **GO** for
+  the first real write against `.64` with a dedicated `svc-pegaprox-rw`
+  account on a confirmed-ONLINE pool.
+
 ## [0.3.0] - 2026-07-20 (post-review hardening, round 2 — write-path)
 
 Two independent reviews (code-reviewer + silent-failure-hunter) audited F2

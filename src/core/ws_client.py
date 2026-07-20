@@ -71,6 +71,12 @@ from .errors import (
 log = logging.getLogger('plugin.truenas.ws_client')
 
 DEFAULT_TIMEOUT = 10.0
+# Writes (dataset/snapshot create/update/delete) can legitimately take much
+# longer than a read (recursive delete, encrypted/dedup create). Reusing
+# DEFAULT_TIMEOUT for writes would raise a false TrueNASTimeoutError while
+# the write is still genuinely in flight on TrueNAS's side (QA fable finding,
+# 2026-07-20, pre real-.64 test) — callers doing a write pass this explicitly.
+WRITE_TIMEOUT = 60.0
 DEFAULT_MAX_RECONNECT_ATTEMPTS = 5
 DEFAULT_BACKOFF_BASE_S = 1.0
 DEFAULT_BACKOFF_CAP_S = 30.0
@@ -551,7 +557,18 @@ class TrueNASWSClient:
         with self._pending_lock:
             entry = self._pending.pop(req_id, None)
         if entry is None:
-            log.debug(f'[truenas] response for unknown/expired id={req_id}, dropping')
+            # An orphaned response (its call() already gave up on timeout) is
+            # normally harmless for a read. For a write it's the ONLY
+            # evidence of whether the write actually landed on TrueNAS after
+            # this client stopped waiting — losing it at debug level would
+            # make a real create/delete outcome invisible (QA fable finding,
+            # 2026-07-20). Escalate whenever the frame carries a result or
+            # an error; a bare ack with neither stays at debug.
+            if 'result' in msg or msg.get('error') is not None:
+                log.warning(f"[truenas] late response for expired id={req_id} carried "
+                            f"a result/error the caller already timed out on: {msg}")
+            else:
+                log.debug(f'[truenas] response for unknown/expired id={req_id}, dropping')
             return
         entry['response'] = msg
         entry['event'].set()

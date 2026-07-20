@@ -6,6 +6,7 @@
 import pytest
 
 from core.subsystem import ConfirmationRequired
+from core.ws_client import WRITE_TIMEOUT
 from subsystems import snapshots
 from tests.unit.fakes import FakeConn
 
@@ -107,3 +108,20 @@ def test_delete_calls_the_same_envelope_the_builder_produces():
     method, params = conn.calls[0]
     assert (method, params) == snapshots.build_delete_envelope(
         'tank/test-dataset@snap1', 'tank/test-dataset@snap1')
+
+
+# ---------------------------------------------------------------------------
+# Regression (QA fable, 2026-07-20, pre real-.64 test): same WRITE_TIMEOUT
+# requirement as datasets.py — see that test module for the rationale.
+# ---------------------------------------------------------------------------
+
+def test_create_uses_write_timeout_not_default():
+    conn = FakeConn({'pool.snapshot.create': {'id': 'tank/test-dataset@snap1'}})
+    snapshots.create(conn, 'tank/test-dataset', 'snap1')
+    assert conn.timeouts[0] == WRITE_TIMEOUT
+
+
+def test_delete_uses_write_timeout_not_default():
+    conn = FakeConn({'pool.snapshot.delete': True})
+    snapshots.delete(conn, 'tank/test-dataset@snap1', 'tank/test-dataset@snap1')
+    assert conn.timeouts[0] == WRITE_TIMEOUT

@@ -8,6 +8,7 @@ import pytest
 
 from core.errors import TrueNASRPCError
 from core.subsystem import ConfirmationRequired
+from core.ws_client import WRITE_TIMEOUT
 from subsystems import datasets
 from tests.unit.fakes import FakeConn
 
@@ -149,3 +150,28 @@ def test_delete_calls_the_same_envelope_the_builder_produces():
     method, params = conn.calls[0]
     assert (method, params) == datasets.build_delete_envelope(
         'tank/test-dataset', 'tank/test-dataset')
+
+
+# ---------------------------------------------------------------------------
+# Regression (QA fable, 2026-07-20, pre real-.64 test): create/update/delete
+# must use WRITE_TIMEOUT, not the 10s read default — a slow real ZFS write
+# (recursive delete, encrypted/dedup create) must not be misreported as a
+# TrueNASTimeoutError while it's still genuinely in flight on TrueNAS.
+# ---------------------------------------------------------------------------
+
+def test_create_uses_write_timeout_not_default():
+    conn = FakeConn({'pool.dataset.create': {'id': 'tank/test-dataset'}})
+    datasets.create(conn, {'name': 'tank/test-dataset'})
+    assert conn.timeouts[0] == WRITE_TIMEOUT
+
+
+def test_update_uses_write_timeout_not_default():
+    conn = FakeConn({'pool.dataset.update': True})
+    datasets.update(conn, 'tank/test-dataset', {'volsize': 4096})
+    assert conn.timeouts[0] == WRITE_TIMEOUT
+
+
+def test_delete_uses_write_timeout_not_default():
+    conn = FakeConn({'pool.dataset.delete': True})
+    datasets.delete(conn, 'tank/test-dataset', 'tank/test-dataset')
+    assert conn.timeouts[0] == WRITE_TIMEOUT

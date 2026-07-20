@@ -153,6 +153,43 @@ def test_call_raises_timeout_when_no_response_arrives():
     _shutdown(client, ft)
 
 
+def test_late_response_after_timeout_is_logged_loudly_when_it_carries_a_result(caplog):
+    """Regression (QA fable, 2026-07-20, pre real-.64 test): once a caller
+    times out, the ``req_id`` entry is already popped from ``_pending`` —
+    if TrueNAS's answer to a WRITE arrives after that, it's the only
+    evidence of whether the write actually applied. Silently dropping it at
+    debug level (as any other harmless late ack) would make that outcome
+    invisible; it must escalate to warning whenever the frame carries a
+    result or an error."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    with pytest.raises(TrueNASTimeoutError):
+        client.call('pool.dataset.delete', ['tank/test-dataset'], timeout=0.05)
+    req = json.loads(ft.sent[0])
+
+    with caplog.at_level(logging.WARNING, logger='plugin.truenas.ws_client'):
+        ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+        assert _wait_for(lambda: any('late response' in r.message for r in caplog.records))
+    _shutdown(client, ft)
+
+
+def test_late_response_after_timeout_stays_quiet_when_it_is_a_bare_ack(caplog):
+    """A late response with neither 'result' nor 'error' (an unusual but
+    harmless shape) must not spam a warning for every ordinary expired-id
+    frame — only ones that actually carry a write outcome."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    with pytest.raises(TrueNASTimeoutError):
+        client.call('system.info', timeout=0.05)
+    req = json.loads(ft.sent[0])
+
+    with caplog.at_level(logging.DEBUG, logger='plugin.truenas.ws_client'):
+        ft.push({'jsonrpc': '2.0', 'id': req['id']})
+        assert _wait_for(lambda: any('unknown/expired' in r.message for r in caplog.records))
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    _shutdown(client, ft)
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC error propagation
 # ---------------------------------------------------------------------------
