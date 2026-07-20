@@ -427,9 +427,67 @@ def _dataset_update_execute(conn, payload):
     return datasets_mod.update(conn, payload.get('dataset_id'), payload.get('changes') or {})
 
 
+# pool.dataset.update accepts write-only CONTROL params that are never
+# persisted dataset properties — a re-read will never echo them back, so
+# comparing them would always "mismatch" even on a fully successful
+# update. force_size ("bypass the >80%-available guard on a zvol resize",
+# brief §4.2) is the one named explicitly in the brief; excluded from
+# verification, not from the actual write payload sent to TrueNAS.
+_UPDATE_CONTROL_ONLY_FIELDS = {'force_size'}
+
+
+def _dataset_field_matches(actual, expected):
+    """Best-effort compare one re-read TrueNAS dataset field against the
+    value a write requested. TrueNAS commonly nests dataset properties as
+    ``{'parsed': ..., 'rawvalue': ...}``; unwrap those before comparing.
+    Not live-confirmed for this exact shape this session — deliberately
+    returns False (i.e. "not confirmed as matching") rather than raising
+    on any structure it doesn't recognize, so an unexpected shape shows up
+    as an unconfirmed change, never a crash."""
+    if isinstance(actual, dict):
+        if 'parsed' in actual:
+            return actual['parsed'] == expected
+        if 'rawvalue' in actual:
+            return str(actual['rawvalue']) == str(expected)
+        return False
+    return actual == expected
+
+
 def _verify_dataset_updated(conn, payload, result):
-    found = datasets_subsystem.read(conn, payload.get('dataset_id'))
-    return found is not None, found
+    """Re-reads the dataset and compares every field in
+    ``payload['changes']`` against it. A bare "does the dataset still
+    exist" check (the previous implementation) was vacuously true even
+    BEFORE the update ran — it could never catch an update that silently
+    didn't apply, or distinguish a still-running async job from a real
+    success (code-reviewer + silent-failure-hunter finding, F2 review
+    round 2: the 'pending' branch was unreachable for updates because
+    this always reported True).
+
+    Design choice (documented per the coordinator's explicit request):
+    field comparison was chosen over unconditionally forcing 'pending' on
+    an int result, because it gives a REAL signal (verified/not) when the
+    write turns out to be synchronous — which the brief's own uncertainty
+    note treats as at least as likely as async. The existing job_id logic
+    in the caller already falls through to 'pending' whenever this
+    returns False AND the result was an int, so the two approaches
+    compose: a genuine mismatch on a synchronous write still surfaces as
+    'verify_failed' (a real problem), while the same mismatch after an
+    async int result surfaces as 'pending' (genuinely unknown) — never a
+    false 'ok' either way.
+    """
+    dataset_id = payload.get('dataset_id')
+    found = datasets_subsystem.read(conn, dataset_id)
+    if found is None:
+        return False, None
+    changes = payload.get('changes') or {}
+    comparable = {k: v for k, v in changes.items() if k not in _UPDATE_CONTROL_ONLY_FIELDS}
+    if not comparable:
+        return True, found
+    all_confirmed = all(
+        _dataset_field_matches(found.get(key), expected)
+        for key, expected in comparable.items()
+    )
+    return all_confirmed, found
 
 
 def _dataset_delete_build(payload):
@@ -515,22 +573,36 @@ def _resolve_writable_instance(instance_id):
     must exist, must NOT be in readonly mode, and must have ``api_key_rw``
     configured — ALL checked before any envelope is even built, let alone
     before touching TrueNAS. ``readonly`` is the server-side kill-switch
-    (brief §3) and is the final authority no matter what the UI shows."""
+    (brief §3) and is the final authority no matter what the UI shows.
+
+    Returns ``(instance, error_response_or_None, reject_reason_or_None)`` —
+    the reason is a short machine-readable code the caller audits even on
+    a pre-execution rejection (a rejected delete attempt against a
+    readonly instance is exactly the kind of signal an audit trail exists
+    to catch).
+
+    Fail-closed on ``readonly``: ``inst.get('readonly') is not False``
+    treats anything other than an explicit ``false`` — missing key,
+    ``true``, or a hand-edited ``null`` in config.json — as readonly.
+    ``inst.get('readonly', True)`` (the previous check) only defaulted a
+    MISSING key to safe; an explicit ``null`` (falsy in Python) slipped
+    through as "not readonly", a real gap for a hand-edited config.json.
+    """
     if not instance_id:
-        return None, (jsonify({'error': 'instance_id is required'}), 400)
+        return None, (jsonify({'error': 'instance_id is required'}), 400), 'missing_instance_id'
     cfg = config_store.load_config(CONFIG_PATH)
     inst = config_store.find_instance(cfg['instances'], instance_id)
     if not inst:
-        return None, (jsonify({'error': f"instance '{instance_id}' not found"}), 404)
-    if inst.get('readonly', True):
+        return None, (jsonify({'error': f"instance '{instance_id}' not found"}), 404), 'not_found'
+    if inst.get('readonly') is not False:
         return None, (jsonify({
             'error': f"instance '{instance_id}' is in readonly mode — writes "
-                     f"are disabled server-side"}), 403)
+                     f"are disabled server-side"}), 403), 'readonly'
     if not inst.get('api_key_rw'):
         return None, (jsonify({
             'error': f"instance '{instance_id}' has no api_key_rw configured — "
-                     f"writes are disabled"}), 403)
-    return inst, None
+                     f"writes are disabled"}), 403), 'no_api_key_rw'
+    return inst, None, None
 
 
 def _get_rw_authenticated_connection(inst):
@@ -581,7 +653,19 @@ def writes_execute_handler():
     RW connect+login -> call() -> post-write verify -> audit -> response.
     Never retries automatically on a step 5/6 failure (step 8) — the
     response always carries the real observed status so the operator can
-    decide whether to re-check or retry from the UI."""
+    decide whether to re-check or retry from the UI.
+
+    Every pre-execution rejection (unknown instance/readonly/no RW key/bad
+    confirmation) is ALSO audited (as ``<action>.rejected``) — a rejected
+    delete attempt is exactly the signal an audit trail exists to catch
+    (F2 review round 2 finding); only ``instance_id``/unknown-op are too
+    generic to attribute to any instance and are not audited.
+
+    Once ``execute`` has actually run against TrueNAS, ``_audit()`` for the
+    real outcome is guaranteed via ``try/finally`` — structurally, not by
+    convention — so an exception during the post-write verify (ANY
+    exception, not only ``TrueNASError``) can never leave a real write
+    without an audit trail (F2 review round 2, P0)."""
     if (err := _require_admin()):
         return err
     raw_body = request.get_json(silent=True)
@@ -597,15 +681,22 @@ def writes_execute_handler():
     if not op_entry:
         return jsonify({'error': f"unknown write operation '{subsystem}.{op}'"}), 400
 
-    inst, err_resp = _resolve_writable_instance(instance_id)
+    def _audit_rejected(reason, extra=''):
+        log_audit(user=_username(), action=f'truenas.{subsystem}.{op}.rejected',
+                  details=f"instance={instance_id} reason={reason}{extra}")
+
+    inst, err_resp, reject_reason = _resolve_writable_instance(instance_id)
     if err_resp:
+        _audit_rejected(reject_reason)
         return err_resp
 
     try:
         method, params = op_entry['build'](payload)
     except ConfirmationRequired as e:
+        _audit_rejected('confirmation_mismatch', f': {e}')
         return jsonify({'error': str(e)}), 400
     except ValueError as e:
+        _audit_rejected('invalid_payload', f': {e}')
         return jsonify({'error': str(e)}), 400
 
     client_id = inst.get('client_id', 'unassigned')
@@ -632,30 +723,54 @@ def writes_execute_handler():
         return jsonify({'ok': False, 'status': 'error', 'error': f'unexpected error: {e}',
                         'method': method, 'params': params}), 500
 
-    job_id = result if isinstance(result, int) else None
+    # bool is a subclass of int in Python — isinstance(True, int) is True.
+    # A synchronous write returning True (success, no job) must never be
+    # mistaken for a job id, or a real verify mismatch on it would get
+    # reported as 'pending' ("still running, check later") forever instead
+    # of 'verify_failed' (a real problem) (F2 review round 2 finding).
+    job_id = result if isinstance(result, int) and not isinstance(result, bool) else None
 
-    # Post-write verify (brief §5 step 6). Its own failure is logged but
-    # does not change the response's error handling above — this call
-    # already succeeded per TrueNAS; a verify-read failure just means we
-    # can't confirm the outcome, reported as 'verify_failed' below.
-    verify_ok, verify_resource = None, None
+    # Post-write verify (brief §5 step 6). The execute call above ALREADY
+    # succeeded against TrueNAS by this point — from here on, _audit() for
+    # whatever we end up reporting is GUARANTEED via try/finally, not just
+    # "called at the end of the happy path". A verify that raises ANY
+    # exception (not just TrueNASError — an unexpected shape/AttributeError
+    # counts too) must never let a real write escape without an audit
+    # entry (F2 review round 2, P0).
+    verify_ok, verify_resource, verify_error = None, None, None
+    status = 'verify_error'
     try:
-        verify_ok, verify_resource = op_entry['verify'](conn, payload, result)
-    except TrueNASError as e:
-        log.warning(f"[{PLUGIN_ID}] post-write verify failed for '{subsystem}.{op}' on "
-                    f"instance '{instance_id}': {e}")
+        try:
+            verify_ok, verify_resource = op_entry['verify'](conn, payload, result)
+        except TrueNASError as e:
+            verify_error = str(e)
+            log.warning(f"[{PLUGIN_ID}] post-write verify failed for '{subsystem}.{op}' on "
+                        f"instance '{instance_id}': {e}")
+        except Exception as e:
+            verify_error = f'unexpected error during verify: {e}'
+            log.error(f"[{PLUGIN_ID}] unexpected error verifying '{subsystem}.{op}' on "
+                      f"instance '{instance_id}': {e}", exc_info=True)
 
-    if verify_ok is True:
-        status = 'ok'
-    elif job_id is not None:
-        # Genuinely unknown whether this is an async job still running or
-        # an actual failure — no job poller in F2. Report 'pending', never
-        # a false success or failure (step 8).
-        status = 'pending'
-    else:
-        status = 'verify_failed'
+        if verify_error is not None:
+            # Distinct from 'verify_failed': the write may well have
+            # succeeded — we just couldn't confirm it (timeout, dropped
+            # connection right after the write). For a delete, "still
+            # exists" (verify_failed) and "couldn't check" (verify_error)
+            # call for opposite operator reactions and must not collapse
+            # into the same status (F2 review round 2 finding).
+            status = 'verify_error'
+        elif verify_ok is True:
+            status = 'ok'
+        elif job_id is not None:
+            # Genuinely unknown whether this is an async job still running
+            # or an actual failure — no job poller in F2. Report 'pending',
+            # never a false success or failure (step 8).
+            status = 'pending'
+        else:
+            status = 'verify_failed'
+    finally:
+        _audit(status, f' verify_error={verify_error}' if verify_error else '')
 
-    _audit(status)
     return jsonify({
         'ok': status == 'ok',
         'status': status,
@@ -663,6 +778,7 @@ def writes_execute_handler():
         'params': params,
         'job_id': job_id,
         'verify': verify_resource,
+        'verify_error': verify_error,
     })
 
 

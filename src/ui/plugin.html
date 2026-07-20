@@ -820,7 +820,12 @@
     document.getElementById('dsw-confirm').value = '';
     document.getElementById('dataset-write-preview').textContent = '';
     document.getElementById('dataset-write-result').textContent = '';
-    document.getElementById('btn-dataset-confirm').disabled = (op !== 'update');
+    // create/update are safe to run without a typed confirmation (only
+    // delete needs one, enabled below by the dsw-confirm input listener) —
+    // must NOT disable for 'create' too, or the button is permanently
+    // stuck disabled since the confirmation field is hidden and never
+    // enables it (this broke dataset creation entirely, F2 review round 2).
+    document.getElementById('btn-dataset-confirm').disabled = (op === 'delete');
   }
 
   function closeDatasetForm() {
@@ -828,32 +833,39 @@
     datasetWrite = { op: null, datasetId: null };
   }
 
-  function parseJsonField(raw, fallback) {
-    if (!raw || !raw.trim()) return fallback;
+  // Never silently degrades malformed JSON to {} — a typo in the extra
+  // properties field used to create the dataset anyway, minus whatever the
+  // operator actually typed, while still reporting success (F2 review
+  // round 2 finding). Returns {ok:true, value} or {ok:false, error}.
+  function parseJsonField(raw) {
+    if (!raw || !raw.trim()) return { ok: true, value: {} };
     try {
-      return JSON.parse(raw);
+      return { ok: true, value: JSON.parse(raw) };
     } catch (e) {
-      return fallback;
+      return { ok: false, error: e.message };
     }
   }
 
+  // Returns {payload} on success or {error} if a JSON field didn't parse —
+  // callers must check .error and refuse to preview/execute rather than
+  // falling back to an empty object.
   function datasetPayload() {
     if (datasetWrite.op === 'create') {
+      var extra = parseJsonField(document.getElementById('dsw-changes').value);
+      if (!extra.ok) return { error: 'JSON inválido en "Campos": ' + extra.error };
       var payload = { name: document.getElementById('dsw-name').value.trim() };
-      var extra = parseJsonField(document.getElementById('dsw-changes').value, {});
-      for (var k in extra) { payload[k] = extra[k]; }
-      return payload;
+      for (var k in extra.value) { payload[k] = extra.value[k]; }
+      return { payload: payload };
     }
     if (datasetWrite.op === 'update') {
-      return {
-        dataset_id: datasetWrite.datasetId,
-        changes: parseJsonField(document.getElementById('dsw-changes').value, {}),
-      };
+      var changes = parseJsonField(document.getElementById('dsw-changes').value);
+      if (!changes.ok) return { error: 'JSON inválido en "Campos": ' + changes.error };
+      return { payload: { dataset_id: datasetWrite.datasetId, changes: changes.value } };
     }
-    return {
+    return { payload: {
       dataset_id: datasetWrite.datasetId,
       confirm_name: document.getElementById('dsw-confirm').value.trim(),
-    };
+    } };
   }
 
   document.getElementById('btn-new-dataset').addEventListener('click', function () {
@@ -865,20 +877,34 @@
       this.value.trim() !== datasetWrite.datasetId;
   });
   document.getElementById('btn-dataset-preview').addEventListener('click', function () {
+    var btn = this;
     var out = document.getElementById('dataset-write-preview');
+    var built = datasetPayload();
+    if (built.error) { out.textContent = built.error; return; }
+    btn.disabled = true;
     out.textContent = 'Consultando…';
-    writesDryRun('datasets', datasetWrite.op, datasetPayload()).then(function (res) {
+    writesDryRun('datasets', datasetWrite.op, built.payload).then(function (res) {
       if (res.status !== 200) {
         out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
         return;
       }
       out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
-    }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+      .finally(function () { btn.disabled = false; });
   });
   document.getElementById('btn-dataset-confirm').addEventListener('click', function () {
+    // Guards against a double-click (or real ZFS-write latency) firing
+    // writes/execute twice — a second concurrent create fails "already
+    // exists" and that error response overwrites the first call's success
+    // message, with no server-side idempotency to fall back on (F2 review
+    // round 2 finding).
+    var btn = this;
     var out = document.getElementById('dataset-write-result');
+    var built = datasetPayload();
+    if (built.error) { out.textContent = built.error; return; }
+    btn.disabled = true;
     out.textContent = 'Ejecutando…';
-    writesExecute(state.selectedInstance, 'datasets', datasetWrite.op, datasetPayload())
+    writesExecute(state.selectedInstance, 'datasets', datasetWrite.op, built.payload)
       .then(function (res) {
         if (res.status >= 400) {
           out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
@@ -890,7 +916,8 @@
           closeDatasetForm();
           invalidateAndRefetch('datasets');
         }
-      }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+        .finally(function () { btn.disabled = false; });
   });
 
   // -- Snapshot write form --------------------------------------------------
@@ -942,7 +969,9 @@
       this.value.trim() !== snapshotWrite.snapshotId;
   });
   document.getElementById('btn-snapshot-preview').addEventListener('click', function () {
+    var btn = this;
     var out = document.getElementById('snapshot-write-preview');
+    btn.disabled = true;
     out.textContent = 'Consultando…';
     writesDryRun('snapshots', snapshotWrite.op, snapshotPayload()).then(function (res) {
       if (res.status !== 200) {
@@ -950,10 +979,14 @@
         return;
       }
       out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
-    }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+      .finally(function () { btn.disabled = false; });
   });
   document.getElementById('btn-snapshot-confirm').addEventListener('click', function () {
+    // Same double-submit guard as the dataset form — see its comment.
+    var btn = this;
     var out = document.getElementById('snapshot-write-result');
+    btn.disabled = true;
     out.textContent = 'Ejecutando…';
     writesExecute(state.selectedInstance, 'snapshots', snapshotWrite.op, snapshotPayload())
       .then(function (res) {
@@ -967,7 +1000,8 @@
           closeSnapshotForm();
           invalidateAndRefetch('snapshots');
         }
-      }).catch(function (e) { out.textContent = networkErrorMessage(e); });
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+        .finally(function () { btn.disabled = false; });
   });
 
   loadConfig();

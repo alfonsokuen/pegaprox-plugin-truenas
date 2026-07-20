@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.3.0] - 2026-07-20 (post-review hardening, round 2 — write-path)
+
+Two independent reviews (code-reviewer + silent-failure-hunter) audited F2
+with more rigor than earlier rounds, being real write-path code. They
+confirmed the core architecture holds (genuinely non-divergent dry-run/
+execute builder, fail-closed readonly/RW gate, unbypassable confirm_name,
+real RO/RW separation) but found 10 real issues, one of which broke the
+phase's main feature outright.
+
+- **[Broke the feature] "Confirmar y ejecutar" was permanently disabled
+  for dataset CREATE.** `disabled = (op !== 'update')` disabled the button
+  for create too; create's confirmation field is hidden, so nothing ever
+  re-enabled it — creating a dataset from the UI was literally impossible.
+  Fixed to `disabled = (op === 'delete')`.
+- **Post-write verify is now exception-proof, and audit is now
+  structurally guaranteed.** Previously only `TrueNASError` was caught
+  around the verify step; any other exception (AttributeError on an
+  unexpected shape, a different timeout type) escaped AFTER a real write
+  had already run against TrueNAS, skipped the audit call, and 500'd —
+  the operator would see "error" while the dataset/snapshot had actually
+  been created/deleted, with zero audit trail. Now wrapped in
+  `except Exception`, and `_audit()` runs inside a `finally` so it fires
+  no matter what happens computing the final status.
+- **Update verify no longer vacuous.** It used to just check "does the
+  dataset still exist" — true before AND after any update, so it could
+  never actually catch a change that silently didn't apply, and made the
+  `'pending'` branch unreachable for updates even on a job-wrapped result.
+  Now compares every field in `payload['changes']` against the re-read
+  dataset (unwrapping TrueNAS's `{'parsed': ..., 'rawvalue': ...}`
+  property shape), excluding `force_size` (a write-only control flag,
+  never a persisted property). **Design decision** (field comparison over
+  unconditionally forcing `'pending'` on any int result): comparison gives
+  a real signal when the write turns out synchronous, and composes with
+  the existing job-id logic — a genuine mismatch still yields `'pending'`
+  when the result looked like a job id, `'verify_failed'` otherwise.
+- **`bool`-as-job-id fixed.** `isinstance(True, int)` is `True` in Python —
+  a synchronous write returning `True` with a real verify failure used to
+  report `'pending'` (masking a real failure as "still running, check
+  later" forever) instead of `'verify_failed'`. Now
+  `isinstance(result, int) and not isinstance(result, bool)`.
+- **`'verify_error'` split out from `'verify_failed'`.** A verify that
+  raised (timeout, dropped connection right after the write) used to
+  collapse into the same status as a verify that ran and genuinely
+  confirmed the wrong state — for a delete, "still there" (verify_failed)
+  and "couldn't check" (verify_error) call for opposite operator
+  reactions. Now distinct, with the raw error surfaced in a new
+  `verify_error` response field.
+- **Pre-execution rejections are now audited too** (`<action>.rejected` —
+  readonly, no RW key, bad typed confirmation). A rejected delete attempt
+  is exactly the signal an audit trail exists to catch; these previously
+  left zero trace.
+- **UI: double-submit guard** on every preview/confirm button — none of
+  them disabled themselves while a request was in flight, so a double-click
+  (or real ZFS-write latency) could fire `writes/execute` twice with no
+  server-side idempotency; a second failing call would overwrite the
+  first call's success message.
+- **UI: malformed JSON in the dataset write form no longer silently
+  degrades to `{}`.** A typo in the extra-properties field used to create
+  the dataset anyway, minus everything the operator typed, while still
+  reporting success. `parseJsonField` now returns an error the caller
+  must check before preview/execute proceed.
+- **`ConnectionManager` cache key is now a tuple `(instance_id, 'ro'|'rw')`**,
+  not a concatenated string — an instance literally named e.g. `'foo::rw'`
+  would have collided with the RW-cached client of an instance named
+  `'foo'`, cross-wiring privilege/host between two distinct instances.
+- **`readonly: null` (hand-edited config.json) now fails closed.**
+  `inst.get('readonly', True)` only defaulted a MISSING key to safe; an
+  explicit `null` (falsy in Python) slipped through as "not readonly".
+  Now `inst.get('readonly') is not False` — anything other than an
+  explicit `false` is treated as readonly.
+- 235 tests (up from 213), verified via `pytest --collect-only -q`. 94%
+  combined coverage on `core/`+`routes/`+`subsystems/` (every module
+  ≥91%). Added `tests/test_ui_static.py`: narrow source-pattern regression
+  guards for the UI bugs above (this repo has no JS test harness).
+
 ## [0.3.0] - 2026-07-20
 
 F2 — first real writes: datasets/zvols and snapshots create/update/delete

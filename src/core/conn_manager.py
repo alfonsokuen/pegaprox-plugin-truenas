@@ -21,7 +21,7 @@ log = logging.getLogger('plugin.truenas.conn_manager')
 class ConnectionManager:
     def __init__(self, client_factory=None):
         self._client_factory = client_factory or TrueNASWSClient
-        self._clients = {}          # instance_id -> TrueNASWSClient
+        self._clients = {}          # (instance_id, 'ro'|'rw') -> TrueNASWSClient
         self._lock = threading.Lock()
 
     def get_connection(self, instance_cfg):
@@ -34,7 +34,7 @@ class ConnectionManager:
         ``get_rw_connection()`` for writes; it is a SEPARATE cached client
         specifically so a write never upgrades the shared read connection's
         privilege level."""
-        return self._get_or_create(instance_cfg['id'], instance_cfg)
+        return self._get_or_create((instance_cfg['id'], 'ro'), instance_cfg)
 
     def get_rw_connection(self, instance_cfg):
         """Return the (lazily created) client dedicated to WRITE operations
@@ -42,9 +42,16 @@ class ConnectionManager:
         read-only client (brief §3: minimum privilege in runtime). Logging
         in here with ``api_key_rw`` must never touch the RO client's cache
         entry, and vice versa."""
-        return self._get_or_create(f"{instance_cfg['id']}::rw", instance_cfg)
+        return self._get_or_create((instance_cfg['id'], 'rw'), instance_cfg)
 
     def _get_or_create(self, cache_key, instance_cfg):
+        """``cache_key`` is a ``(instance_id, 'ro'|'rw')`` tuple, never a
+        concatenated string — an instance legitimately named e.g. ``'foo::rw'``
+        would otherwise collide with the RW-cached client of an instance
+        named ``'foo'``, cross-wiring privilege/host between two distinct
+        instances. A tuple key makes that collision structurally
+        impossible regardless of what characters an operator puts in an
+        instance id."""
         with self._lock:
             client = self._clients.get(cache_key)
             if client is None:
@@ -59,11 +66,11 @@ class ConnectionManager:
             return client
 
     def is_connected(self, instance_id):
-        client = self._clients.get(instance_id)
+        client = self._clients.get((instance_id, 'ro'))
         return bool(client and client.is_connected)
 
     def connection_error(self, instance_id):
-        client = self._clients.get(instance_id)
+        client = self._clients.get((instance_id, 'ro'))
         return client.last_error if client else None
 
     def test_connection(self, instance_cfg, api_key):
@@ -112,8 +119,8 @@ class ConnectionManager:
         (host/port/TLS changed), and leaving a stale RW client connected
         while the RO one gets dropped would be a confusing half-reset."""
         with self._lock:
-            ro_client = self._clients.pop(instance_id, None)
-            rw_client = self._clients.pop(f'{instance_id}::rw', None)
+            ro_client = self._clients.pop((instance_id, 'ro'), None)
+            rw_client = self._clients.pop((instance_id, 'rw'), None)
         if ro_client:
             ro_client.close()
         if rw_client:

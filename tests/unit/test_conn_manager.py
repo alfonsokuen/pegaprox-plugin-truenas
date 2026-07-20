@@ -314,3 +314,31 @@ def test_close_all_also_closes_rw_clients():
     mgr.close_all()
     assert all(c.close_called for c in clients)
     assert len(clients) == 2
+
+
+# ---------------------------------------------------------------------------
+# Regression (F2 review round 2, finding #8): the cache key must be a
+# tuple, never a concatenated string like f"{id}::rw" — an instance
+# legitimately named e.g. "foo::rw" would otherwise collide with the RW
+# client cached for an instance named "foo", cross-wiring privilege/host
+# between two distinct instances.
+# ---------------------------------------------------------------------------
+
+def test_cache_key_collision_between_literal_and_suffixed_instance_id():
+    created = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+
+    # An admin names one real instance "foo" and (however unlikely) another
+    # "foo::rw" — a string-concatenated cache key would make get_rw_connection
+    # for "foo" collide with get_connection for "foo::rw".
+    foo_rw_client = mgr.get_rw_connection(_instance_cfg(id_='foo'))
+    literal_client = mgr.get_connection(_instance_cfg(id_='foo::rw'))
+
+    assert foo_rw_client is not literal_client
+    assert len(created) == 2
