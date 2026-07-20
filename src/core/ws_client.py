@@ -180,6 +180,14 @@ class TrueNASWSClient:
         self._subscriptions_lock = threading.Lock()
 
         self._api_key = None        # kept only to support relogin after reconnect
+        # Distinct from `self._api_key is not None`: the key is kept around
+        # across a torn-down socket so a reconnect can relogin, but the
+        # CURRENT socket's session is gone the moment it's torn down. F1's
+        # subsystem routes gate their first call per request on
+        # `is_authenticated`, so this must go False exactly when the live
+        # session actually stops being valid, not just when we forget the
+        # key.
+        self._authenticated = False
         self._last_error = None
 
         self._reader_thread = None
@@ -190,6 +198,15 @@ class TrueNASWSClient:
     @property
     def is_connected(self):
         return self._connected
+
+    @property
+    def is_authenticated(self):
+        """True once ``login()``/``_do_login()`` succeeded on the CURRENT
+        socket. Goes False on any teardown (close(), a torn-down failed
+        relogin, or an unexpected disconnect) — a fresh reconnect always
+        needs a fresh login even though ``_api_key`` is retained for the
+        auto-relogin path."""
+        return self._authenticated
 
     @property
     def last_error(self):
@@ -271,6 +288,7 @@ class TrueNASWSClient:
                 except Exception:
                     pass
             self._connected = False
+            self._authenticated = False
             self._last_error = reason
         self._fail_all_pending(reason)
 
@@ -355,6 +373,7 @@ class TrueNASWSClient:
     def _handle_unexpected_disconnect(self, reason):
         with self._connect_lock:
             self._connected = False
+            self._authenticated = False
             self._last_error = reason
         self._fail_all_pending(reason)
         log.warning(f'[truenas] socket to {self.host}:{self.port} dropped: {reason}')
@@ -574,6 +593,7 @@ class TrueNASWSClient:
             raise TrueNASAuthError('auth.login_with_api_key', {'message': 'rejected'})
         self._api_key = api_key
         self.needs_auth = False
+        self._authenticated = True
         return result
 
     # -- events (hook for F1: core.get_jobs) -----------------------------------

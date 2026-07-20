@@ -6,10 +6,29 @@ is deprecated in 25.10 and removed in TrueNAS 26, so this plugin never uses
 it. See `PEGAPROX_PLUGIN_TRUENAS_BRIEF.md` (in the workspace, not this repo)
 for the full architecture, phase plan and known gotchas.
 
-**This is F0 (v0.1.0): an installable skeleton.** It ships the transport
-layer, config, and UI shell only — no subsystem (pools, datasets, snapshots,
-shares, replication, apps/VMs) is implemented yet. Every tab except
-**Settings** is an empty placeholder. F1 adds read-only monitoring.
+**This is F1 (v0.2.0): full read-only monitoring**, on top of the F0
+transport layer/config/UI shell — verified live against the real `.64`
+instance (login + `system.info` + `alert.list` + `pool.query`). Every tab
+(Overview/Pools & Discos/Datasets/Snapshots/Shares/Replicación/Apps-VMs/
+Settings) now shows real data. No writes anywhere yet — create/update/
+delete on any subsystem is F2+.
+
+## What's in F1 (on top of F0)
+
+- `src/core/subsystem.py` — the `Subsystem` contract (`list`/`read`/
+  `health`, `write()` read-only by default) every module in
+  `src/subsystems/` implements.
+- `src/subsystems/{system,pools,datasets,snapshots,shares,replication,
+  apps_vms}.py` — one module per TrueNAS concept, each wrapping the exact
+  JSON-RPC methods from brief §4.2. See CHANGELOG.md `[0.2.0]` for the
+  full per-module method list and the pools temperature-exclusion safety
+  correction (brief §4.3/§9).
+- 7 new read routes in `src/routes/api.py`, `instance_id` as a query param
+  (see the module docstring for why — the confirmed plugin routing
+  mechanism doesn't support URL path parameters).
+- `TrueNASWSClient.is_authenticated` — tracks the CURRENT socket's live
+  session, distinct from "an api_key is remembered for relogin".
+- `src/ui/plugin.html` — every tab fetches and renders real data now.
 
 ## What's in F0
 
@@ -47,6 +66,7 @@ assignable permissions. This plugin reuses:
 | Action | Permission |
 |---|---|
 | `ui` (the tab itself) | `storage.view` |
+| `system`, `pools`, `datasets`, `snapshots`, `shares`, `replication`, `apps_vms` (F1 reads) | `storage.view` |
 | `config`, `config/save`, `instances/test` (touch API keys) | admin role only |
 
 `admin` always passes any `has_permission` check automatically.
@@ -70,12 +90,14 @@ Each entry in `instances[]`:
 unused in F0 (no subsystem polls anything yet), validated and persisted for
 F1 to consume.
 
-## The only real TrueNAS interaction allowed in F0
+## `instances/test`
 
-`instances/test` connects the WebSocket and calls
-`auth.login_with_api_key` — nothing else. It's used from the Settings tab's
-"Probar conexión" button, works against either a saved instance (`id`) or an
-unsaved draft from the form, and never persists anything to `config.json`.
+Connects the WebSocket and calls `auth.login_with_api_key` — nothing else
+(no subsystem call). Used from the Settings tab's "Probar conexión" button,
+works against either a saved instance (`id`) or an unsaved draft from the
+form, and never persists anything to `config.json`. (F0 called this "the
+only real TrueNAS interaction allowed" — F1 adds seven read-only ones on
+top, see above.)
 
 ## Design decisions taken where the brief was ambiguous
 
@@ -107,20 +129,41 @@ unsaved draft from the form, and never persists anything to `config.json`.
   flow described in brief §6/§7) — it resolves a masked `api_key_ro` back to
   the stored value only when an `id` matching a saved instance is supplied.
 
-## Pendiente de F0-deploy / F1 (explicitly out of scope here)
+## Design decisions taken in F1 where the brief was ambiguous
+
+- **`instance_id` as a query param, not a URL path segment.** The brief's
+  `/<instance_id>/<subsystem>` phrasing reads like a URL template, but the
+  only routing mechanism confirmed in production
+  (`pegaprox.api.plugins.register_plugin_route`, verified against
+  `pegaprox-plugin-wake-on-lan`) maps one FIXED path string per handler —
+  wake-on-lan's own dynamic routes already use query params for exactly
+  this reason. Followed the proven pattern rather than assume PegaProx's
+  catch-all supports path parameters it hasn't been observed to support.
+- **`shares.list()`/`apps_vms.list()` return a dict, not a flat list.**
+  Both wrap multiple distinct TrueNAS collections (SMB/NFS/3× iSCSI;
+  apps/VMs) that the UI's own tab layout (brief §6) treats as separate
+  groups — flattening them would just force the caller to re-split what
+  was artificially joined.
+- **No `virt.instance.*` shim for VMs.** The brief flags 25.04→25.10 moved
+  VMs between Incus and libvirt namespaces. `vm.query` responds (with
+  `[]`) on the real `.64` (25.10.1) today, so no shim is implemented —
+  adding one now would be speculative code for a namespace not in use on
+  the only instance this plugin talks to. Add it if/when a future instance
+  proves `vm.query` errors and `virt.instance.query` answers instead.
+
+## Pendiente de F1-deploy / F2+ (explicitly out of scope here)
 
 - **`websocket-client` vendoring.** CT119 has no external DNS/internet
   access. `requirements.txt` declares the dependency, but making it
   available offline (vendored into the plugin's cache dir, or pre-installed
-  from a LAN-reachable mirror) is deploy work, not build work — F0 does not
-  solve it.
-- No subsystem collectors/writers (`src/subsystems/` is an empty package
-  with a docstring) — pools/datasets/snapshots/shares/replication/apps_vms
-  land in F1+.
+  from a LAN-reachable mirror) is deploy work, not build work.
+- No writers on any subsystem (create/update/delete) — F2+ per the brief's
+  phase table, behind the dry-run/confirm/audit write-path (brief §5).
 - No `check_cluster_access` per-client RBAC — admin-only gate until a second
   real client (SACEI/INGESA/GeoSpace) is on-boarded.
-- No installation on CT119, no API key of any real instance connected — both
-  require explicit operator confirmation in a separate session (brief §0.5).
+- No installation on CT119, no connection to any instance besides `.64` —
+  both require explicit operator confirmation in a separate session
+  (brief §0.5).
 
 ## Development
 

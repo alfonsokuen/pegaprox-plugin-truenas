@@ -1,8 +1,8 @@
 {
   "name": "TrueNAS",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "IDKMANAGER",
-  "description": "Monitors and controls one or more TrueNAS SCALE instances from the PegaProx panel (TrueCommand-style): pools/disks health, resilver/scrub progress, datasets, snapshots, shares, replication and apps/VMs over the JSON-RPC 2.0 WebSocket API. F0: installable skeleton with a persistent, reconnecting WS client and multi-instance config; monitoring/write features land in later phases.",
+  "description": "Monitors and controls one or more TrueNAS SCALE instances from the PegaProx panel (TrueCommand-style): pools/disks health, resilver/scrub progress, datasets, snapshots, shares, replication and apps/VMs over the JSON-RPC 2.0 WebSocket API. F1: full read-only monitoring (system/pools/datasets/snapshots/shares/replication/apps-vms) against the live-verified WS client; writes land in F2+.",
   "min_pegaprox": "0.9.9.3",
   "license": "MIT",
   "has_frontend": true,

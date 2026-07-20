@@ -903,3 +903,108 @@ def test_client_threads_tls_server_name_through_to_transport_factory():
 
     assert captured['tls_server_name'] == 'nube.idkmanager.com'
     _shutdown(client, ft)
+
+
+# ---------------------------------------------------------------------------
+# is_authenticated — F1's subsystem routes gate their first call per
+# request on this, so it must track the CURRENT socket's session, not just
+# whether an api_key was ever remembered.
+# ---------------------------------------------------------------------------
+
+def test_is_authenticated_false_before_any_login():
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+    assert client.is_authenticated is False
+    _shutdown(client, ft)
+
+
+def test_is_authenticated_true_after_successful_login():
+    ft = FakeTransport()
+    client = _client_with(ft)
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    assert client.is_authenticated is True
+    _shutdown(client, ft)
+
+
+def test_is_authenticated_false_after_close():
+    ft = FakeTransport()
+    client = _client_with(ft)
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+    assert client.is_authenticated is True
+
+    ft.push({'jsonrpc': '2.0', 'method': 'noop'})
+    client.close()
+    assert client.is_authenticated is False
+
+
+def test_is_authenticated_false_after_unexpected_disconnect_before_relogin():
+    """A dropped socket must never report a session that's actually gone —
+    even before the background worker has had a chance to relogin."""
+    ft = FakeTransport()
+    client = _client_with(ft, auto_reconnect=False)
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+    assert client.is_authenticated is True
+
+    ft.push_error(ConnectionResetError('drop'))
+    assert _wait_for(lambda: not client.is_connected)
+    assert client.is_authenticated is False
+
+
+def test_is_authenticated_true_again_after_successful_relogin_on_reconnect():
+    ft1 = FakeTransport()
+    ft2 = FakeTransport()
+    transports = iter([ft1, ft2])
+
+    def factory(url, verify_tls, timeout, tls_server_name=None):
+        return next(transports)
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None)
+    client.connect()
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft1.sent)
+    req = json.loads(ft1.sent[0])
+    ft1.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    ft1.push_error(ConnectionResetError('drop'))
+    assert _wait_for(lambda: ft2.sent, timeout=3)
+    relogin_req = json.loads(ft2.sent[-1])
+    ft2.push({'jsonrpc': '2.0', 'id': relogin_req['id'], 'result': True})
+
+    assert _wait_for(lambda: client.is_authenticated, timeout=3)
+    _shutdown(client, ft2)

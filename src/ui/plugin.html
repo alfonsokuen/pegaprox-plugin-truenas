@@ -86,6 +86,17 @@
   .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .checkbox-field input { width: auto; }
   a.link { color: var(--accent); }
+  .bento { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat { font-size: 22px; font-weight: 600; }
+  .stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 8px; }
+  .progress > div { height: 100%; background: var(--accent); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.ONLINE, .badge.true { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.DEGRADED, .badge.FAULTED, .badge.UNAVAIL, .badge.false { background: rgba(248,81,73,.15); color: var(--err); }
+  .badge.WARNING, .badge.NOTICE { background: rgba(210,153,34,.15); color: var(--warn); }
+  .subtab-hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .loading { color: var(--muted); font-style: italic; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -107,13 +118,28 @@
 </nav>
 
 <main>
-  <section class="tab" id="tab-overview"><div class="empty">Overview llega en F1 (system.info, alert.list, pool.query en vivo).</div></section>
-  <section class="tab" id="tab-pools"><div class="empty">Pools &amp; Discos llega en F1.</div></section>
-  <section class="tab" id="tab-datasets"><div class="empty">Datasets llega en F1 (lectura) / F2 (crear-editar).</div></section>
-  <section class="tab" id="tab-snapshots"><div class="empty">Snapshots llega en F1 (lectura) / F2 (crear-borrar).</div></section>
-  <section class="tab" id="tab-shares"><div class="empty">Shares (SMB/NFS/iSCSI) llega en F3.</div></section>
-  <section class="tab" id="tab-replication"><div class="empty">Replicación llega en F4.</div></section>
-  <section class="tab" id="tab-apps"><div class="empty">Apps/VMs llega en F3.</div></section>
+  <section class="tab" id="tab-overview"><div id="ov-body" class="empty">Elegí una instancia arriba para ver su estado.</div></section>
+  <section class="tab" id="tab-pools"><div id="pools-body" class="empty">Elegí una instancia arriba para ver sus pools.</div></section>
+  <section class="tab" id="tab-datasets">
+    <div class="subtab-hint">Solo lectura en F1 — crear/editar llega en F2.</div>
+    <div id="datasets-body" class="empty">Elegí una instancia arriba.</div>
+  </section>
+  <section class="tab" id="tab-snapshots">
+    <div class="subtab-hint">Solo lectura en F1 — crear/borrar llega en F2.</div>
+    <div id="snapshots-body" class="empty">Elegí una instancia arriba.</div>
+  </section>
+  <section class="tab" id="tab-shares">
+    <div class="subtab-hint">Solo lectura en F1 — CRUD llega en F3.</div>
+    <div id="shares-body" class="empty">Elegí una instancia arriba.</div>
+  </section>
+  <section class="tab" id="tab-replication">
+    <div class="subtab-hint">Solo lectura en F1 — crear tareas llega en F4.</div>
+    <div id="replication-body" class="empty">Elegí una instancia arriba.</div>
+  </section>
+  <section class="tab" id="tab-apps">
+    <div class="subtab-hint">Solo lectura en F1 — start/stop llega en F3.</div>
+    <div id="apps-body" class="empty">Elegí una instancia arriba.</div>
+  </section>
 
   <section class="tab active" id="tab-settings">
     <div class="toolbar">
@@ -160,7 +186,7 @@
   if (theme) document.documentElement.setAttribute('data-theme', theme);
 
   var API_BASE = '/api/plugins/truenas/api/';
-  var state = { config: null, editingId: null };
+  var state = { config: null, editingId: null, selectedInstance: '', loadedTabs: {} };
 
   function api(path, opts) {
     opts = opts || {};
@@ -183,8 +209,14 @@
       document.querySelectorAll('main .tab').forEach(function (t) { t.classList.remove('active'); });
       btn.classList.add('active');
       document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      refreshTab(btn.dataset.tab);
     });
   });
+
+  function activeTabName() {
+    var active = document.querySelector('#tabs button.active');
+    return active ? active.dataset.tab : null;
+  }
 
   // -- instance selector (grouped by client, per brief §3.1) -----------
   function renderSelector(groups) {
@@ -376,14 +408,230 @@
   });
 
   document.getElementById('instance-select').addEventListener('change', function (e) {
+    state.selectedInstance = e.target.value || '';
+    state.loadedTabs = {};  // force a fresh fetch for the new instance
     var chip = document.getElementById('instance-chip');
-    chip.textContent = e.target.value ? 'seleccionada' : '';
+    chip.textContent = state.selectedInstance ? 'seleccionada' : '';
     chip.className = 'chip';
+    refreshTab(activeTabName());
   });
 
-  // Non-Settings tabs are intentionally inert in F0 (no subsystem routes
-  // exist yet) — keep them enabled (per the plan) but they only show the
-  // "coming in F1/F2/F3" placeholder already in the markup.
+  // -- F1: subsystem tabs (Overview/Pools/Datasets/Snapshots/Shares/
+  // Replicación/Apps-VMs) — fetch real data from the F1 read routes. -----
+
+  function fetchSubsystem(name) {
+    var qs = '?instance_id=' + encodeURIComponent(state.selectedInstance);
+    return api(name + qs);
+  }
+
+  function badge(text) {
+    return '<span class="badge ' + esc(text) + '">' + esc(text) + '</span>';
+  }
+
+  var TAB_BODY_ID = {
+    overview: 'ov-body', pools: 'pools-body', datasets: 'datasets-body',
+    snapshots: 'snapshots-body', shares: 'shares-body',
+    replication: 'replication-body', apps: 'apps-body',
+  };
+  // Overview reuses the pools+system data (no dedicated route) — settings
+  // has its own load path (loadConfig) and is excluded here.
+  var TAB_SUBSYSTEM = {
+    overview: 'system', pools: 'pools', datasets: 'datasets',
+    snapshots: 'snapshots', shares: 'shares', replication: 'replication',
+    apps: 'apps_vms',
+  };
+
+  function refreshTab(tab) {
+    if (!tab || tab === 'settings') return;
+    var bodyId = TAB_BODY_ID[tab];
+    if (!bodyId) return;
+    var body = document.getElementById(bodyId);
+    if (!state.selectedInstance) {
+      body.className = 'empty';
+      body.innerHTML = 'Elegí una instancia arriba.';
+      return;
+    }
+    var cacheKey = tab + '::' + state.selectedInstance;
+    if (state.loadedTabs[cacheKey]) return;  // already fetched for this instance
+    body.className = 'loading';
+    body.textContent = 'Cargando…';
+
+    if (tab === 'overview') {
+      Promise.all([fetchSubsystem('system'), fetchSubsystem('pools')]).then(function (results) {
+        renderOverview(body, results[0], results[1]);
+        state.loadedTabs[cacheKey] = true;
+      });
+      return;
+    }
+
+    fetchSubsystem(TAB_SUBSYSTEM[tab]).then(function (res) {
+      if (res.status !== 200) {
+        body.className = 'empty';
+        body.innerHTML = esc((res.data && res.data.error) || 'error');
+        return;
+      }
+      RENDERERS[tab](body, res.data.data);
+      state.loadedTabs[cacheKey] = true;
+    });
+  }
+
+  function renderOverview(body, sysRes, poolsRes) {
+    body.className = '';
+    if (sysRes.status !== 200 || poolsRes.status !== 200) {
+      body.innerHTML = '<div class="empty">' +
+        esc((sysRes.data && sysRes.data.error) || (poolsRes.data && poolsRes.data.error) || 'error') +
+        '</div>';
+      return;
+    }
+    var sys = sysRes.data.data, pools = poolsRes.data.data;
+    var health = sys.health || {};
+    var poolHealth = pools.health || {};
+    var poolList = pools.pools || [];
+    var scanning = poolList.filter(function (p) { return p.scan && p.scan.state === 'SCANNING'; });
+
+    var html = '<div class="bento">';
+    html += '<div class="card"><div class="stat-label">Sistema</div>' +
+      '<div class="stat">' + badge(health.healthy ? 'ONLINE' : 'DEGRADED') + '</div>' +
+      '<div>' + esc(health.summary || '') + '</div></div>';
+    html += '<div class="card"><div class="stat-label">Pools</div>' +
+      '<div class="stat">' + badge(poolHealth.healthy ? 'ONLINE' : 'DEGRADED') + '</div>' +
+      '<div>' + esc(poolHealth.summary || '') + '</div></div>';
+    html += '<div class="card"><div class="stat-label">Alertas activas</div>' +
+      '<div class="stat">' + (sys.alerts || []).length + '</div></div>';
+    html += '<div class="card"><div class="stat-label">Versión</div>' +
+      '<div class="stat" style="font-size:14px">' + esc((sys.info || {}).version || '?') + '</div>' +
+      '<div>' + esc((sys.info || {}).hostname || '') + '</div></div>';
+    html += '</div>';
+
+    if (scanning.length) {
+      html += '<div class="card"><h2>Resilver/scrub en curso</h2>';
+      scanning.forEach(function (p) {
+        var pct = (p.scan && p.scan.percentage) || 0;
+        html += '<div style="margin-bottom:10px">' + esc(p.name) + ' — ' +
+          esc(p.scan.function || '') + ' ' + pct.toFixed(1) + '%' +
+          '<div class="progress"><div style="width:' + pct + '%"></div></div></div>';
+      });
+      html += '</div>';
+    }
+
+    if ((sys.alerts || []).length) {
+      html += '<div class="card"><h2>Alertas</h2><table><thead><tr><th>Nivel</th><th>Mensaje</th></tr></thead><tbody>';
+      sys.alerts.slice(0, 20).forEach(function (a) {
+        html += '<tr><td>' + badge(a.level || '?') + '</td><td>' + esc(a.formatted || a.text || '') + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html;
+  }
+
+  function renderPools(body, data) {
+    body.className = '';
+    var pools = data.pools || [], temps = data.temperatures || {};
+    if (!pools.length) { body.className = 'empty'; body.innerHTML = 'Sin pools.'; return; }
+    var html = '<table><thead><tr><th>Pool</th><th>Estado</th><th>Scan</th></tr></thead><tbody>';
+    pools.forEach(function (p) {
+      var scan = p.scan && p.scan.state === 'SCANNING'
+        ? (p.scan.function + ' ' + (p.scan.percentage || 0).toFixed(1) + '%') : '—';
+      html += '<tr><td>' + esc(p.name) + '</td><td>' + badge(p.status || '?') + '</td><td>' + esc(scan) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    var diskNames = Object.keys(temps);
+    if (diskNames.length) {
+      html += '<h2 style="margin-top:16px;font-size:14px">Temperaturas</h2><table><thead><tr><th>Disco</th><th>Temp</th></tr></thead><tbody>';
+      diskNames.forEach(function (name) {
+        html += '<tr><td>' + esc(name) + '</td><td>' + esc(temps[name]) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    body.innerHTML = html;
+  }
+
+  function renderSimpleTable(body, items, columns) {
+    body.className = '';
+    if (!items || !items.length) { body.className = 'empty'; body.innerHTML = 'Sin datos.'; return; }
+    var html = '<table><thead><tr>' + columns.map(function (c) { return '<th>' + esc(c[0]) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    items.forEach(function (item) {
+      html += '<tr>' + columns.map(function (c) { return '<td>' + esc(c[1](item)) + '</td>'; }).join('') + '</tr>';
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  }
+
+  var RENDERERS = {
+    overview: null,  // handled specially in refreshTab
+    pools: renderPools,
+    datasets: function (body, items) {
+      renderSimpleTable(body, items, [
+        ['Nombre', function (d) { return d.name || d.id; }],
+        ['Tipo', function (d) { return d.type || ''; }],
+        ['Uso', function (d) { return (d.used && d.used.parsed) || ''; }],
+        ['Disponible', function (d) { return (d.available && d.available.parsed) || ''; }],
+      ]);
+    },
+    snapshots: function (body, data) {
+      var html = '<h2 style="font-size:14px">Snapshots</h2>';
+      body.className = '';
+      body.innerHTML = html;
+      var snapDiv = document.createElement('div');
+      body.appendChild(snapDiv);
+      renderSimpleTable(snapDiv, data.snapshots, [
+        ['Nombre', function (s) { return s.name || s.id; }],
+        ['Dataset', function (s) { return s.dataset || ''; }],
+        ['Creado', function (s) { return (s.properties && s.properties.creation && s.properties.creation.parsed) || ''; }],
+      ]);
+      var tasksDiv = document.createElement('div');
+      tasksDiv.innerHTML = '<h2 style="font-size:14px;margin-top:16px">Tareas periódicas</h2>';
+      body.appendChild(tasksDiv);
+      var tasksTable = document.createElement('div');
+      tasksDiv.appendChild(tasksTable);
+      renderSimpleTable(tasksTable, data.tasks, [
+        ['Dataset', function (t) { return t.dataset || ''; }],
+        ['Schedule', function (t) { return JSON.stringify(t.schedule || {}); }],
+        ['Enabled', function (t) { return t.enabled ? 'sí' : 'no'; }],
+      ]);
+    },
+    shares: function (body, data) {
+      body.className = '';
+      body.innerHTML =
+        '<h2 style="font-size:14px">SMB</h2><div id="shares-smb"></div>' +
+        '<h2 style="font-size:14px;margin-top:16px">NFS</h2><div id="shares-nfs"></div>' +
+        '<h2 style="font-size:14px;margin-top:16px">iSCSI targets</h2><div id="shares-iscsi"></div>';
+      renderSimpleTable(document.getElementById('shares-smb'), data.smb, [
+        ['Nombre', function (s) { return s.name || s.path; }],
+        ['Path', function (s) { return s.path || ''; }],
+        ['Enabled', function (s) { return s.enabled ? 'sí' : 'no'; }],
+      ]);
+      renderSimpleTable(document.getElementById('shares-nfs'), data.nfs, [
+        ['Path(s)', function (s) { return (s.paths || []).join(', '); }],
+        ['Enabled', function (s) { return s.enabled ? 'sí' : 'no'; }],
+      ]);
+      renderSimpleTable(document.getElementById('shares-iscsi'), data.iscsi_targets, [
+        ['Nombre', function (t) { return t.name || ''; }],
+        ['Alias', function (t) { return t.alias || ''; }],
+      ]);
+    },
+    replication: function (body, items) {
+      renderSimpleTable(body, items, [
+        ['Nombre', function (r) { return r.name || r.id; }],
+        ['Estado', function (r) { return (r.state && r.state.state) || r.state || ''; }],
+        ['Última corrida', function (r) { return (r.job && r.job.time && r.job.time.finished) || ''; }],
+      ]);
+    },
+    apps: function (body, data) {
+      body.className = '';
+      body.innerHTML =
+        '<h2 style="font-size:14px">Apps (Docker)</h2><div id="apps-list"></div>' +
+        '<h2 style="font-size:14px;margin-top:16px">VMs</h2><div id="vms-list"></div>';
+      renderSimpleTable(document.getElementById('apps-list'), data.apps, [
+        ['Nombre', function (a) { return a.name || a.id; }],
+        ['Estado', function (a) { return a.state || ''; }],
+      ]);
+      renderSimpleTable(document.getElementById('vms-list'), data.vms, [
+        ['Nombre', function (v) { return v.name || v.id; }],
+        ['Estado', function (v) { return v.status && v.status.state || ''; }],
+      ]);
+    },
+  };
 
   loadConfig();
 })();

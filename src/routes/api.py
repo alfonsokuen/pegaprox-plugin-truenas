@@ -4,16 +4,30 @@ plugin catch-all under ``/api/plugins/truenas/api/<path>``.
 
 RBAC (brief §2 — PegaProx's PERMISSIONS table is fixed, a plugin cannot
 register new verbs):
-  GET  ui              -> serve the UI shell               (storage.view)
-  GET  config          -> instances (keys masked) + poll    (admin)
-  POST config/save     -> validate + persist config         (admin)
-  POST instances/test  -> connect+login_with_api_key only   (admin)
+  GET  ui                                  -> UI shell                (storage.view)
+  GET  config                              -> instances (masked)+poll (admin)
+  POST config/save                         -> validate + persist      (admin)
+  POST instances/test                      -> connect+login only      (admin)
+  GET  system|pools|datasets|snapshots|
+       shares|replication|apps_vms         -> subsystem read (F1)     (storage.view)
 
-F0 exposes ONLY these routes. Every other tab in the UI is empty chrome —
-no subsystem route exists yet (F1+). Reads are nominally gated by
-``storage.view`` (per the brief), but config/instances-test also touch API
-keys, so — mirroring wake-on-lan's SSH-credentials gate — they require the
-admin role outright, not just the read verb.
+Every F1 subsystem route takes ``instance_id`` as a QUERY PARAM (e.g.
+``GET .../pools?instance_id=datos-64``), not a URL path segment. This is a
+deliberate deviation from the brief's illustrative
+``/<instance_id>/<subsystem>`` phrasing: the only CONFIRMED-in-production
+plugin routing mechanism (``pegaprox.api.plugins.register_plugin_route``,
+verified against ``pegaprox-plugin-wake-on-lan``) maps one FIXED path
+string per handler — it does not support Flask-style path parameters.
+wake-on-lan's own dynamic routes (``job``, `status`) already use query
+params (``request.args.get('job_id')``) for exactly this reason, so this
+follows the one pattern actually proven to work rather than assuming
+PegaProx's catch-all supports URL templating it hasn't been observed to
+support.
+
+Config/instances-test require the admin role outright (they touch API
+keys, mirroring wake-on-lan's SSH-credentials gate); the F1 read routes
+only require ``storage.view`` — they never see a key, only a subsystem's
+read-only JSON-RPC results.
 """
 
 import logging
@@ -26,6 +40,19 @@ from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
 
 from core.conn_manager import ConnectionManager
+from core.errors import TrueNASError
+from subsystems.apps_vms import apps_vms as apps_vms_subsystem
+from subsystems.datasets import datasets as datasets_subsystem
+from subsystems.pools import list_disks as pools_list_disks
+from subsystems.pools import pools as pools_subsystem
+from subsystems.pools import temperatures as pools_temperatures
+from subsystems.replication import replication as replication_subsystem
+from subsystems.shares import shares as shares_subsystem
+from subsystems.snapshots import list_tasks as snapshots_list_tasks
+from subsystems.snapshots import snapshots as snapshots_subsystem
+from subsystems.system import alerts as system_alerts
+from subsystems.system import system as system_subsystem
+from subsystems.system import update_status as system_update_status
 from . import config_store
 
 PLUGIN_ID = 'truenas'
@@ -181,10 +208,12 @@ def instances_test_handler():
             'use_tls debe ser true si hay una API key configurada (TrueNAS '
             'revoca la key automáticamente sobre HTTP plano)')}), 400
 
+    tls_server_name = body.get('tls_server_name', (saved or {}).get('tls_server_name'))
     instance_cfg = {
         'id': instance_id or f'test-{host}',
         'host': host, 'port': port,
         'use_tls': bool(use_tls), 'verify_tls': bool(verify_tls),
+        'tls_server_name': tls_server_name or None,
     }
     result = conn_manager.test_connection(instance_cfg, api_key_ro)
     client_id = (saved or {}).get('client_id', 'unassigned')
@@ -192,6 +221,120 @@ def instances_test_handler():
               details=(f"instance={instance_cfg['id']} client={client_id} "
                        f"host={host} ok={result['ok']}"))
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# F1: subsystem read routes — shared instance resolution + error handling
+# ---------------------------------------------------------------------------
+
+def _resolve_instance(instance_id):
+    """Look up ``instance_id`` in config.json and validate it's usable for
+    a read. Returns ``(instance_dict, None)`` or ``(None, error_response)``
+    where ``error_response`` is a ready-to-return ``(jsonify(...), status)``
+    tuple — never a bare 500, same standard as ``config``/``instances/test``."""
+    if not instance_id:
+        return None, (jsonify({'error': 'instance_id is required'}), 400)
+    cfg = config_store.load_config(CONFIG_PATH)
+    inst = config_store.find_instance(cfg['instances'], instance_id)
+    if not inst:
+        return None, (jsonify({'error': f"instance '{instance_id}' not found"}), 404)
+    if not inst.get('api_key_ro'):
+        return None, (jsonify({
+            'error': f"instance '{instance_id}' has no api_key_ro configured — "
+                     f"add one from Settings before viewing this tab"}), 400)
+    return inst, None
+
+
+def _get_authenticated_connection(inst):
+    """Return the (cached, persistent) client for ``inst``, logged in with
+    ``api_key_ro`` if the CURRENT socket hasn't authenticated yet.
+    Read-only routes always use the RO key — never RW, even if configured
+    (brief §3: minimum privilege in runtime, regardless of the instance's
+    ``readonly`` flag, which gates writers, not this)."""
+    conn = conn_manager.get_connection(inst)
+    if not conn.is_authenticated:
+        conn.login(inst['api_key_ro'])
+    return conn
+
+
+def _subsystem_route(fetch_fn):
+    """Shared body for every F1 read-only subsystem route: permission gate,
+    instance resolution via the ``instance_id`` query param, lazy
+    connect+login, and TrueNAS-error -> clear-context JSON (never a bare,
+    unexplained 500). ``fetch_fn(conn) -> JSON-serializable data``.
+    """
+    if (err := _require(PERM_VIEW)):
+        return err
+    instance_id = request.args.get('instance_id', '').strip()
+    inst, err_resp = _resolve_instance(instance_id)
+    if err_resp:
+        return err_resp
+    try:
+        conn = _get_authenticated_connection(inst)
+        data = fetch_fn(conn)
+    except TrueNASError as e:
+        return jsonify({'error': str(e), 'instance_id': instance_id}), 502
+    except Exception as e:  # defensive: never let a subsystem bug 500 mute
+        log.error(f"[{PLUGIN_ID}] unexpected error in subsystem route for "
+                  f"instance '{instance_id}': {e}", exc_info=True)
+        return jsonify({'error': f'unexpected error: {e}', 'instance_id': instance_id}), 500
+    return jsonify({'instance_id': instance_id, 'data': data})
+
+
+def _system_fetch(conn):
+    active_alerts = system_alerts(conn)
+    return {
+        'info': system_subsystem.read(conn),
+        'alerts': active_alerts,
+        'update_status': system_update_status(conn),
+        'health': system_subsystem.health(conn, active_alerts=active_alerts).to_dict(),
+    }
+
+
+def system_handler():
+    return _subsystem_route(_system_fetch)
+
+
+def _pools_fetch(conn):
+    pool_list = pools_subsystem.list(conn)
+    disks = pools_list_disks(conn)
+    return {
+        'pools': pool_list,
+        'disks': disks,
+        'temperatures': pools_temperatures(conn, disks=disks, pools=pool_list),
+        'health': pools_subsystem.health(conn, pools=pool_list).to_dict(),
+    }
+
+
+def pools_handler():
+    return _subsystem_route(_pools_fetch)
+
+
+def datasets_handler():
+    return _subsystem_route(datasets_subsystem.list)
+
+
+def _snapshots_fetch(conn):
+    return {
+        'snapshots': snapshots_subsystem.list(conn),
+        'tasks': snapshots_list_tasks(conn),
+    }
+
+
+def snapshots_handler():
+    return _subsystem_route(_snapshots_fetch)
+
+
+def shares_handler():
+    return _subsystem_route(shares_subsystem.list)
+
+
+def replication_handler():
+    return _subsystem_route(replication_subsystem.list)
+
+
+def apps_vms_handler():
+    return _subsystem_route(apps_vms_subsystem.list)
 
 
 # ---------------------------------------------------------------------------
@@ -203,4 +346,11 @@ ROUTES = {
     'config': config_handler,
     'config/save': config_save_handler,
     'instances/test': instances_test_handler,
+    'system': system_handler,
+    'pools': pools_handler,
+    'datasets': datasets_handler,
+    'snapshots': snapshots_handler,
+    'shares': shares_handler,
+    'replication': replication_handler,
+    'apps_vms': apps_vms_handler,
 }

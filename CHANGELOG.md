@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.2.0] - 2026-07-20
+
+F1 — full read-only monitoring, on top of the WS client/conn_manager
+verified live against `.64` in F0.
+
+- **`Subsystem` contract** (`src/core/subsystem.py`): `list`/`read`/`health`
+  per TrueNAS concept, `write()` raising `ReadOnlySubsystem` by default
+  (every F1 subsystem is read-only; F2+ overrides `write()` behind the
+  dry-run/confirm/audit pattern, brief §5). `HealthReport` dataclass with a
+  `to_dict()` for JSON responses.
+- **Seven subsystem modules** (`src/subsystems/`), each wrapping the
+  TrueNAS JSON-RPC methods from brief §4.2:
+  - `system.py` — `system.info`, `alert.list`, `update.status` (never
+    `update.check_available`, removed in 25.x). Health = no active
+    (non-dismissed) alert at ERROR or above.
+  - `pools.py` — `pool.query`, `disk.query`, `disk.temperature_agg`.
+    Carries the brief's safety correction (§4.3/§9): `pool.query`/its
+    `scan` field reads pure ZFS kernel state and is safe to poll on any
+    schedule, even mid-resilver; temperature polling explicitly excludes
+    every disk belonging to a currently DEGRADED/FAULTED/UNAVAIL pool
+    (walks `topology` recursively to resolve pool → disk device names).
+  - `datasets.py` — `pool.dataset.query` + best-effort
+    `pool.dataset.get_quota` (a bad dataset id degrades to `[]` for that
+    dataset only, never fails the whole sweep).
+  - `snapshots.py` — `pool.snapshot.query` + `pool.snapshottask.query`.
+  - `shares.py` — SMB/NFS/iSCSI (5 TrueNAS collections); `list()`
+    deliberately returns a dict keyed by kind, not a flattened list — the
+    UI's own SMB/NFS/iSCSI tabs need them separate anyway.
+  - `replication.py` — `replication.query`.
+  - `apps_vms.py` — `app.query` + `vm.query`. Both confirmed live against
+    the real `.64` (25.10.1) responding `[]`; no `virt.instance.*` shim
+    added — would be speculative code for a namespace not in use on the
+    only instance this plugin talks to today.
+- **7 new read routes** (`GET .../system|pools|datasets|snapshots|shares|
+  replication|apps_vms`), gated by `storage.view`. Deliberate deviation
+  from the brief's illustrative `/<instance_id>/<subsystem>` URL template:
+  `instance_id` travels as a query param, matching the only CONFIRMED
+  plugin routing mechanism (`register_plugin_route` maps one fixed path
+  string per handler — no path parameters, same pattern already used by
+  wake-on-lan's `job`/`status` routes). Shared error handling
+  (`_resolve_instance` / `_get_authenticated_connection` /
+  `_subsystem_route`) resolves the instance from config, lazily
+  connects+logs in with `api_key_ro` (never RW, even if configured), and
+  turns any `TrueNASError` into a clear-context JSON response — never a
+  bare, unexplained 500.
+- **`TrueNASWSClient.is_authenticated`**: distinct from "an api_key is
+  remembered" — tracks whether the CURRENT socket has a live, successful
+  session. Goes `False` on `close()`, a torn-down failed relogin, or an
+  unexpected disconnect, even before the background worker gets a chance
+  to relogin. The subsystem routes gate their first call per request on
+  this so a persistent, cached-per-instance connection only logs in once,
+  not on every poll.
+- **UI**: Overview/Pools & Discos/Datasets/Snapshots/Shares/Replicación/
+  Apps-VMs now fetch and render real data (bento health cards + live
+  resilver/scrub progress bars on Overview, per-pool status + temperature
+  table on Pools, plain tables elsewhere) instead of placeholder text.
+  Settings is unchanged. No design-system pass this round — functionality
+  over polish per this phase's explicit scope.
+- 149 tests (unit + route-level), verified via `pytest --collect-only -q`.
+  93%+ combined coverage on `core/` + `routes/` + `subsystems/` (every
+  individual module ≥90%).
+
+Still F1 scope only: no writes anywhere (create/update/delete is F2+), no
+connection to any instance besides `.64`, no deploy/push.
+
 ## [0.1.0] - 2026-07-20
 
 Initial release — F0 (installable skeleton).
