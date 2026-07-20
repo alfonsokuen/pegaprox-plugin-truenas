@@ -18,7 +18,10 @@ needs the field to exist, persist, and be usable for UI grouping; the real
 """
 
 import json
+import logging
 import os
+
+log = logging.getLogger('plugin.truenas.config_store')
 
 DEFAULT_POLL = {'fast_s': 10, 'slow_s': 60, 'cold_s': 900}
 MASK = '***'
@@ -42,7 +45,16 @@ def load_config(path):
             raise ValueError('config root must be an object')
     except FileNotFoundError:
         return default_config()
-    except Exception:
+    except Exception as e:
+        # This used to be swallowed with no logging at all, despite the
+        # docstring above claiming otherwise. A corrupt config.json meant
+        # instances silently reverted to an empty list with zero trace of
+        # why — and the very next config/save would overwrite the file,
+        # permanently destroying every stored API key with no record of
+        # what happened. Loud and clear now.
+        log.error(f"[truenas] config at {path!r} is corrupt/unreadable, falling back to "
+                  f"an empty config until the operator re-saves from the UI: {e}",
+                  exc_info=True)
         return default_config()
 
     cfg.setdefault('instances', [])
@@ -63,8 +75,13 @@ def save_config(path, cfg):
     os.replace(tmp, path)
     try:
         os.chmod(path, 0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        # This file holds API keys in clear text — a failed chmod means it
+        # may be left world/group-readable. Not fatal (some filesystems,
+        # e.g. Windows dev boxes, don't support POSIX permissions at all),
+        # but silently swallowing it on a real deploy would hide a real
+        # exposure. Warn with the errno so an operator can act on it.
+        log.warning(f'[truenas] could not chmod 600 {path!r}: {e}')
 
 
 def mask_instance(inst):

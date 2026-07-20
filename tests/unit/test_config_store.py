@@ -2,15 +2,16 @@
 """config_store: masking round-trip, client_id passthrough (unmasked),
 use_tls safety guard, poll validation, atomic save."""
 
+import logging
 import os
 
 from routes import config_store
 
 
-def _instance(id_='datos-64', client_id='idkmanager', api_key_ro='real-secret-ro'):
+def _instance(id_='truenas-test', client_id='idkmanager', api_key_ro='real-secret-ro'):
     return {
-        'id': id_, 'name': 'TrueNAS Datos', 'client_id': client_id,
-        'host': '192.0.2.64', 'port': 81, 'use_tls': True, 'verify_tls': False,
+        'id': id_, 'name': 'TrueNAS Test Instance', 'client_id': client_id,
+        'host': '192.0.2.64', 'port': 8443, 'use_tls': True, 'verify_tls': False,
         'api_key_ro': api_key_ro, 'api_key_rw': None, 'readonly': True,
     }
 
@@ -130,7 +131,7 @@ def test_save_and_load_config_round_trips(tmp_path):
     config_store.save_config(path, cfg)
     assert not os.path.exists(path + '.tmp')
     loaded = config_store.load_config(path)
-    assert loaded['instances'][0]['id'] == 'datos-64'
+    assert loaded['instances'][0]['id'] == 'truenas-test'
     assert loaded['instances'][0]['client_id'] == 'idkmanager'
 
 
@@ -140,3 +141,62 @@ def test_save_config_is_chmod_600(tmp_path):
     # chmod is a no-op on some CI filesystems (Windows) — just assert the
     # file exists and save_config() didn't raise on the chmod call.
     assert os.path.exists(path)
+
+
+# ---------------------------------------------------------------------------
+# Regression: a corrupt/unreadable config.json used to fall back to
+# defaults with ZERO logging, despite the docstring claiming otherwise — an
+# operator would see "0 instances" with no trace of why, and the next save
+# would silently overwrite the file, permanently destroying every stored
+# API key (finding #8).
+# ---------------------------------------------------------------------------
+
+def test_load_config_logs_error_on_corrupt_json(tmp_path, caplog):
+    path = tmp_path / 'config.json'
+    path.write_text('{ this is not valid json')
+
+    with caplog.at_level(logging.ERROR, logger='plugin.truenas.config_store'):
+        cfg = config_store.load_config(str(path))
+
+    assert cfg == config_store.default_config()
+    assert any('corrupt' in r.message for r in caplog.records)
+    # The log message embeds the path via !r (repr), which escapes
+    # backslashes on Windows — compare on the filename, not str(path),
+    # to avoid a path-separator/escaping mismatch across platforms.
+    assert any('config.json' in r.message for r in caplog.records)
+
+
+def test_load_config_logs_error_when_root_is_not_an_object(tmp_path, caplog):
+    path = tmp_path / 'config.json'
+    path.write_text('[1, 2, 3]')  # valid JSON, but not a config object
+
+    with caplog.at_level(logging.ERROR, logger='plugin.truenas.config_store'):
+        cfg = config_store.load_config(str(path))
+
+    assert cfg == config_store.default_config()
+    assert any('corrupt' in r.message for r in caplog.records)
+
+
+def test_load_config_missing_file_does_not_log_an_error(tmp_path, caplog):
+    """A missing file is the legitimate "not configured yet" case — it must
+    NOT be logged as an error (that would be alert-fatigue noise on every
+    fresh install)."""
+    path = tmp_path / 'nope.json'
+    with caplog.at_level(logging.ERROR, logger='plugin.truenas.config_store'):
+        config_store.load_config(str(path))
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+def test_save_config_logs_warning_when_chmod_fails(tmp_path, monkeypatch, caplog):
+    """config.json holds API keys in clear text — a failed chmod 600 used
+    to be swallowed with a bare `except OSError: pass`, hiding a real
+    exposure on a real deploy where permissions matter."""
+    def failing_chmod(path, mode):
+        raise OSError(13, 'Permission denied')
+
+    monkeypatch.setattr(os, 'chmod', failing_chmod)
+    path = str(tmp_path / 'config.json')
+    with caplog.at_level(logging.WARNING, logger='plugin.truenas.config_store'):
+        config_store.save_config(path, config_store.default_config())
+    assert os.path.exists(path)  # the write itself must still have succeeded
+    assert any('chmod' in r.message for r in caplog.records)

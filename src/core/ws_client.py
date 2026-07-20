@@ -57,11 +57,23 @@ def _default_transport_factory(url, verify_tls, timeout):
 
     Imported lazily so importing this module never requires the dependency
     to be installed (only actually connecting does).
+
+    ``timeout`` governs only the initial TCP/TLS handshake done by
+    ``create_connection``. Once open, the socket's recv timeout is cleared
+    (``settimeout(None)``) — otherwise an idle-but-perfectly-healthy
+    connection would throw ``WebSocketTimeoutException`` out of ``recv()``
+    every ``timeout`` seconds, which the reader loop would (correctly, from
+    its point of view) treat as a dropped socket: full reconnect + relogin +
+    resubscribe churn, and audit-log spam against the appliance, on a
+    connection that was never actually unhealthy. Per-request timeouts are
+    already enforced independently by ``call()``'s ``Event.wait(timeout)``.
     """
     import websocket  # intentional lazy import — see module docstring
 
     sslopt = None if verify_tls else {'cert_reqs': ssl.CERT_NONE}
-    return websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
+    ws = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
+    ws.settimeout(None)
+    return ws
 
 
 class TrueNASWSClient:
@@ -94,6 +106,27 @@ class TrueNASWSClient:
         self._connected = False
         self._connect_lock = threading.RLock()
         self._send_lock = threading.Lock()
+
+        # Set by an explicit close(); checked by _connect_with_backoff before
+        # every (re)connect attempt (including right after a backoff sleep)
+        # so a close() that races an in-flight background reconnect actually
+        # cancels it, instead of the reconnect thread waking up and silently
+        # opening a fresh socket authenticated with the old api_key. A later
+        # explicit connect() clears it again (intentional reopen).
+        self._closed = False
+
+        # Non-blocking guard: at most one _background_reconnect worker at a
+        # time per client. Without this, a second unexpected drop arriving
+        # while the first recovery is still mid-relogin would spawn a
+        # duplicate worker -> duplicate core.subscribe calls.
+        self._reconnecting = False
+        self._reconnect_guard_lock = threading.Lock()
+
+        # True once a relogin-after-reconnect was rejected by the server
+        # (bad/revoked key) rather than failing transiently — the caller
+        # (conn_manager / routes) can surface this instead of a generic
+        # "not connected".
+        self.needs_auth = False
 
         self._id_seq = itertools.count(1)
         self._id_lock = threading.Lock()
@@ -141,6 +174,7 @@ class TrueNASWSClient:
                 self._last_error = str(e)
                 raise TrueNASConnectionError(f'could not connect to {self.host}:{self.port}: {e}') from e
             self._connected = True
+            self._closed = False  # explicit (re)connect always clears a prior close()
             self._last_error = None
             self._stop_reader.clear()
             self._reader_thread = threading.Thread(
@@ -149,6 +183,21 @@ class TrueNASWSClient:
             log.info(f'[truenas] connected to {self.host}:{self.port}')
 
     def close(self):
+        """User/operator-initiated close: tears down the socket AND cancels
+        any in-flight/future automatic reconnect (``self._closed``)."""
+        with self._connect_lock:
+            self._closed = True
+        self._teardown_socket('connection closed')
+
+    def _teardown_socket(self, reason):
+        """Tear down the current transport and fail any pending calls,
+        WITHOUT touching ``self._closed``. Used both by ``close()`` (which
+        sets ``_closed`` itself beforehand) and internally by
+        ``_relogin_and_resubscribe`` to discard a socket that connected but
+        failed to (re)authenticate — that case must NOT set ``_closed``, or
+        the bounded retry loop in ``_background_reconnect`` would abort
+        after a single failed cycle instead of retrying up to
+        ``max_reconnect_attempts`` times."""
         with self._connect_lock:
             self._stop_reader.set()
             if self._ws is not None:
@@ -157,7 +206,8 @@ class TrueNASWSClient:
                 except Exception:
                     pass
             self._connected = False
-            self._fail_all_pending('connection closed')
+            self._last_error = reason
+        self._fail_all_pending(reason)
 
     def _ensure_connected(self):
         if self._connected:
@@ -175,6 +225,9 @@ class TrueNASWSClient:
         attempts = max_attempts if max_attempts is not None else self.max_reconnect_attempts
         last_exc = None
         for attempt in range(attempts):
+            if self._closed:
+                raise TrueNASConnectionError(
+                    'client was closed; reconnect cancelled before this attempt')
             try:
                 self.connect()
                 return
@@ -186,18 +239,39 @@ class TrueNASWSClient:
                     log.warning(f'[truenas] reconnect attempt {attempt + 1}/{attempts} '
                                 f'failed, retrying in {delay:.1f}s: {e}')
                     self._sleep(delay)
+                    if self._closed:
+                        raise TrueNASConnectionError(
+                            'client was closed during reconnect backoff; cancelled') from e
         raise last_exc or TrueNASConnectionError('reconnect failed for unknown reason')
 
     def _relogin_and_resubscribe(self):
         """After an automatic reconnect, re-login (if we had a session) and
         re-subscribe to every previously-registered event name — otherwise
-        jobs/notifications the UI is watching would go silently orphaned."""
+        jobs/notifications the UI is watching would go silently orphaned.
+
+        On failure, the socket is torn down via ``_teardown_socket`` (never
+        left half-alive reporting ``is_connected == True`` with an
+        unauthenticated/unsubscribed session) and the real cause is
+        recorded in ``last_error`` — this does NOT set ``self._closed``,
+        so a transient failure can still be retried by
+        ``_background_reconnect``. Re-raises
+        so ``_background_reconnect`` can tell an auth rejection (give up,
+        set ``needs_auth``) apart from a transient failure (retry the whole
+        connect+relogin cycle).
+        """
         if self._api_key:
             try:
                 self._do_login(self._api_key)
+            except TrueNASAuthError as e:
+                log.error(f'[truenas] relogin after reconnect rejected by server '
+                          f'(bad/revoked key?): {e}')
+                self.needs_auth = True
+                self._teardown_socket(str(e))
+                raise
             except TrueNASError as e:
-                log.error(f'[truenas] relogin after reconnect failed: {e}')
-                return
+                log.warning(f'[truenas] relogin after reconnect failed transiently: {e}')
+                self._teardown_socket(str(e))
+                raise
         with self._subscriptions_lock:
             names = list(self._subscriptions.keys())
         for name in names:
@@ -212,9 +286,16 @@ class TrueNASWSClient:
             self._last_error = reason
         self._fail_all_pending(reason)
         log.warning(f'[truenas] socket to {self.host}:{self.port} dropped: {reason}')
-        if self.auto_reconnect:
-            threading.Thread(target=self._background_reconnect,
-                              name=f'truenas-reconnect-{self.host}', daemon=True).start()
+        if not self.auto_reconnect:
+            return
+        with self._reconnect_guard_lock:
+            if self._reconnecting:
+                log.debug(f'[truenas] reconnect already in progress for '
+                          f'{self.host}:{self.port}, not spawning a duplicate')
+                return
+            self._reconnecting = True
+        threading.Thread(target=self._background_reconnect,
+                          name=f'truenas-reconnect-{self.host}', daemon=True).start()
 
     def _background_reconnect(self):
         """Recovery path after an *unexpected* drop (see
@@ -224,12 +305,40 @@ class TrueNASWSClient:
         NOT used by ``_ensure_connected()``'s ordinary lazy-connect path —
         calling ``_relogin_and_resubscribe`` there would recurse into
         ``call()`` from inside the very ``login()``/``subscribe()`` that
-        triggered the first connect."""
+        triggered the first connect.
+
+        Only one worker runs at a time per client (``_reconnecting`` guard,
+        set by the caller before spawning this). Retries the FULL
+        connect+relogin cycle (with backoff) on a transient relogin
+        failure — a bare reconnect without relogin would leave the socket
+        open but unauthenticated. Gives up immediately on an auth rejection
+        (``needs_auth`` stays set) rather than hammering a revoked key.
+        """
         try:
-            self._connect_with_backoff()
-            self._relogin_and_resubscribe()
-        except TrueNASConnectionError as e:
-            log.error(f'[truenas] gave up reconnecting to {self.host}:{self.port}: {e}')
+            for cycle in range(self.max_reconnect_attempts):
+                try:
+                    self._connect_with_backoff()
+                except TrueNASConnectionError as e:
+                    log.error(f'[truenas] gave up reconnecting to {self.host}:{self.port}: {e}')
+                    return
+                try:
+                    self._relogin_and_resubscribe()
+                    return
+                except TrueNASAuthError:
+                    return  # needs_auth already set; do not hammer a bad key
+                except TrueNASError as e:
+                    if cycle >= self.max_reconnect_attempts - 1:
+                        log.error(f'[truenas] gave up relogging in to '
+                                  f'{self.host}:{self.port} after {cycle + 1} cycles: {e}')
+                        return
+                    delay = min(self.backoff_cap_s, self.backoff_base_s * (2 ** cycle))
+                    delay *= (0.5 + random.random())
+                    self._sleep(delay)
+                    if self._closed:
+                        return
+        finally:
+            with self._reconnect_guard_lock:
+                self._reconnecting = False
 
     # -- id / pending bookkeeping ---------------------------------------------
 
@@ -303,17 +412,48 @@ class TrueNASWSClient:
                 if not self._stop_reader.is_set():
                     self._handle_unexpected_disconnect(str(e))
                 return
-            if not raw:
-                continue
             try:
-                msg = json.loads(raw)
-            except ValueError:
-                log.warning('[truenas] discarding non-JSON frame from socket')
-                continue
-            if isinstance(msg, dict) and msg.get('id') is not None:
-                self._dispatch_response(msg)
-            else:
-                self._dispatch_notification(msg)
+                self._handle_raw_frame(raw)
+            except Exception as e:
+                # A malformed-but-not-quite-JSON-broken frame (e.g. a dict
+                # whose 'params' is a list instead of a dict, or any other
+                # shape the middleware sends that this client doesn't
+                # anticipate) must NOT silently kill this thread — that
+                # would leave ``is_connected`` stuck True with nobody ever
+                # reading from the socket again, and every future call()
+                # dying by generic timeout with no visible cause. Treat it
+                # exactly like a dropped connection: log loudly, fail
+                # pending calls, and let auto-reconnect take over.
+                log.exception(f'[truenas] reader loop crashed handling a frame from '
+                               f'{self.host}:{self.port}, treating as a dropped connection: {e}')
+                if not self._stop_reader.is_set():
+                    self._handle_unexpected_disconnect(f'reader crashed: {e}')
+                return
+
+    def _handle_raw_frame(self, raw):
+        if not raw:
+            return
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            log.warning('[truenas] discarding non-JSON frame from socket')
+            return
+        if not isinstance(msg, dict):
+            log.warning(f'[truenas] discarding non-object JSON frame from socket: {msg!r}')
+            return
+        if msg.get('id') is not None:
+            self._dispatch_response(msg)
+        elif msg.get('id') is None and msg.get('error') is not None:
+            # A JSON-RPC error with id: null is a protocol-level failure the
+            # server couldn't attribute to any specific request. It cannot
+            # be matched to a pending call() (there's no id to match), so
+            # without this branch it silently fell into the notification
+            # path and vanished — the caller just saw a generic timeout with
+            # no clue why. Surface it loudly instead.
+            log.warning(f'[truenas] server sent a protocol-level error (id=null) from '
+                        f'{self.host}:{self.port}: {msg.get("error")}')
+        else:
+            self._dispatch_notification(msg)
 
     def _dispatch_response(self, msg):
         req_id = msg.get('id')
@@ -331,8 +471,14 @@ class TrueNASWSClient:
         deferred to F1 (jobs.py) — F0 only guarantees callbacks are invoked
         with the raw decoded message for whichever ``method``/collection
         name they subscribed to, never crashing the reader loop if a
-        callback misbehaves."""
-        name = msg.get('method') or (msg.get('params') or {}).get('msg')
+        callback misbehaves. Defensive against non-dict ``msg``/``params``
+        even though ``_handle_raw_frame`` already filters those out — this
+        method must stay safe to call directly too."""
+        if not isinstance(msg, dict):
+            log.warning(f'[truenas] discarding non-dict notification: {msg!r}')
+            return
+        params = msg.get('params')
+        name = msg.get('method') or (params.get('msg') if isinstance(params, dict) else None)
         with self._subscriptions_lock:
             callbacks = list(self._subscriptions.get(name, []))
         for cb in callbacks:
@@ -355,6 +501,7 @@ class TrueNASWSClient:
         if result is False:
             raise TrueNASAuthError('auth.login_with_api_key', {'message': 'rejected'})
         self._api_key = api_key
+        self.needs_auth = False
         return result
 
     # -- events (hook for F1: core.get_jobs) -----------------------------------
@@ -372,6 +519,12 @@ class TrueNASWSClient:
         return self.call('core.subscribe', [name])
 
     def unsubscribe(self, name, callback=None):
+        # TODO(F1): this only stops LOCAL dispatch — it never sends
+        # core.unsubscribe on the wire, so the server keeps pushing
+        # collection_update events for `name` that we now just drop. Harmless
+        # in F0 (nothing calls unsubscribe(); subscribe() itself is unused by
+        # any route yet), but wire the real core.unsubscribe call once F1's
+        # job-tracking actually uses subscribe/unsubscribe in anger.
         with self._subscriptions_lock:
             if name not in self._subscriptions:
                 return

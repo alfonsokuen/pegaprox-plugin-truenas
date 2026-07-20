@@ -52,8 +52,24 @@ class ConnectionManager:
         """Attempt connect + login_with_api_key against ``instance_cfg`` and
         report ok/error — the ONLY real interaction with a TrueNAS instance
         allowed in F0 (routes/api.py's ``instances/test``). Makes no other
-        JSON-RPC call. Never raises: always returns a result dict."""
-        client = self.get_connection(instance_cfg)
+        JSON-RPC call. Never raises: always returns a result dict.
+
+        Builds a throwaway client straight from ``instance_cfg`` via the
+        factory — deliberately NOT ``get_connection()``/the registry cache.
+        Reusing a cached-by-id client here would mean: instance already
+        connected to host A, operator edits the Settings form to host B
+        (same id) and hits "Probar conexión" -> the cached client for that
+        id is already connected to A, so ``connect()`` is a no-op and the
+        login round-trips against A while the route reports success for a
+        B that was never actually contacted. Always closed in ``finally``
+        so a test connection never leaks a live socket into the process.
+        """
+        client = self._client_factory(
+            host=instance_cfg['host'],
+            port=instance_cfg.get('port', 443),
+            use_tls=instance_cfg.get('use_tls', True),
+            verify_tls=instance_cfg.get('verify_tls', False),
+        )
         try:
             client.connect()
             client.login(api_key)
@@ -63,7 +79,13 @@ class ConnectionManager:
             log.error(f"[truenas] unexpected error testing instance "
                       f"'{instance_cfg.get('id')}': {e}", exc_info=True)
             return {'ok': False, 'error': f'unexpected error: {e}'}
-        return {'ok': True, 'error': None}
+        else:
+            return {'ok': True, 'error': None}
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def close(self, instance_id):
         with self._lock:

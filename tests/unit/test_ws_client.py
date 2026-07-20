@@ -5,9 +5,12 @@ reconnection backoff. No real network: a FakeTransport drives ``send``/
 ``recv`` through an in-memory queue."""
 
 import json
+import logging
 import queue
+import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -387,3 +390,355 @@ def test_unexpected_disconnect_fails_pending_call():
     t.join(timeout=2)
     assert isinstance(result_box.get('exc'), TrueNASConnectionError)
     assert not client.is_connected
+
+
+# ---------------------------------------------------------------------------
+# Regression: reader thread must survive malformed/unexpected frame shapes
+# (code-reviewer + silent-failure-hunter finding #1)
+# ---------------------------------------------------------------------------
+
+def test_reader_survives_notification_with_list_params_without_method():
+    """A dict frame with no 'id', no 'method', and 'params' as a LIST (not a
+    dict) used to raise AttributeError inside _dispatch_notification
+    (``(msg.get('params') or {}).get('msg')`` on a list), silently killing
+    the reader thread while ``is_connected`` stayed True forever."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+
+    ft.push({'params': [1, 2, 3]})  # no 'id', no 'method' -> notification path
+
+    # The reader must still be alive: a subsequent call() must complete
+    # normally rather than hang until a generic timeout.
+    result_box = {}
+
+    def do_call():
+        result_box['result'] = client.call('system.info')
+
+    t = threading.Thread(target=do_call)
+    t.start()
+    assert _wait_for(lambda: len(ft.sent) >= 1)
+    req = json.loads(ft.sent[-1])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': 'still-alive'})
+    t.join(timeout=2)
+    assert result_box['result'] == 'still-alive'
+    assert client.is_connected
+    _shutdown(client, ft)
+
+
+def test_reader_survives_non_dict_frame():
+    """A frame that's valid JSON but not an object at all (e.g. a bare
+    list) must be discarded, not crash the reader."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+
+    ft.push([1, 2, 3])
+
+    result_box = {}
+
+    def do_call():
+        result_box['result'] = client.call('system.info')
+
+    t = threading.Thread(target=do_call)
+    t.start()
+    assert _wait_for(lambda: len(ft.sent) >= 1)
+    req = json.loads(ft.sent[-1])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': 'still-alive'})
+    t.join(timeout=2)
+    assert result_box['result'] == 'still-alive'
+    assert client.is_connected
+    _shutdown(client, ft)
+
+
+def test_reader_survives_arbitrary_exception_in_frame_handling(monkeypatch):
+    """Belt-and-suspenders: even if some future frame shape trips an
+    exception _handle_raw_frame itself doesn't anticipate, the read loop's
+    outer try/except must still catch it, fail pending calls, and hand off
+    to auto-reconnect instead of dying silently."""
+    ft1 = FakeTransport()
+    ft2 = FakeTransport()
+    transports = iter([ft1, ft2])
+
+    def factory(url, verify_tls, timeout):
+        return next(transports)
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None)
+    client.connect()
+
+    def boom(raw):
+        raise RuntimeError('unexpected frame shape')
+
+    monkeypatch.setattr(client, '_handle_raw_frame', boom)
+    ft1.push({'anything': 'at-all'})
+
+    assert _wait_for(lambda: client._ws is ft2, timeout=3)
+    assert client.is_connected
+    _shutdown(client, ft2)
+
+
+def test_protocol_error_with_null_id_is_logged_and_reader_survives(caplog):
+    """A JSON-RPC error with id: null can't be matched to any pending
+    call() — it used to fall into the notification path and vanish
+    silently, leaving the real caller staring at a generic timeout."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+
+    with caplog.at_level(logging.WARNING, logger='plugin.truenas.ws_client'):
+        ft.push({'jsonrpc': '2.0', 'id': None, 'error': {'message': 'protocol failure'}})
+        assert _wait_for(
+            lambda: any('protocol-level error' in r.message for r in caplog.records))
+
+    # And the reader must still be usable afterward.
+    result_box = {}
+
+    def do_call():
+        result_box['result'] = client.call('system.info')
+
+    t = threading.Thread(target=do_call)
+    t.start()
+    assert _wait_for(lambda: len(ft.sent) >= 1)
+    req = json.loads(ft.sent[-1])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': 'still-alive'})
+    t.join(timeout=2)
+    assert result_box['result'] == 'still-alive'
+    _shutdown(client, ft)
+
+
+# ---------------------------------------------------------------------------
+# Regression: relogin failure after reconnect must not leave a half-alive
+# connection reporting is_connected=True (finding #2)
+# ---------------------------------------------------------------------------
+
+def test_relogin_transient_failure_tears_down_and_retries_bounded():
+    """A transient relogin failure (e.g. a timeout) must tear down the
+    half-authenticated socket (never leaving is_connected=True with no
+    valid session) and retry the full connect+relogin cycle, bounded by
+    max_reconnect_attempts — not loop forever, and not silently give up
+    after one failure leaving the client permanently disconnected without
+    even exhausting its retry budget."""
+    transports = []
+
+    def factory(url, verify_tls, timeout):
+        ft = FakeTransport()
+        transports.append(ft)
+        return ft
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None, timeout=0.05,
+                              max_reconnect_attempts=3)
+    client.connect()
+    ft1 = transports[0]
+
+    # Establish a session so relogin has an api_key to retry with.
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft1.sent)
+    req = json.loads(ft1.sent[0])
+    ft1.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    # Drop the connection — every subsequent reconnect's relogin call will
+    # simply never get answered, forcing a timeout (transient failure) each
+    # cycle, up to max_reconnect_attempts.
+    ft1.push_error(ConnectionResetError('drop'))
+
+    # 1 (initial) + max_reconnect_attempts reconnect sockets get created.
+    assert _wait_for(lambda: len(transports) >= 1 + client.max_reconnect_attempts, timeout=3)
+    # Give the background worker a moment to finish its last cycle and
+    # release the reconnect guard.
+    assert _wait_for(lambda: client._reconnecting is False, timeout=3)
+
+    assert not client.is_connected
+    assert client.last_error
+    assert not client.needs_auth  # transient, not an auth rejection
+
+
+def test_relogin_auth_rejection_sets_needs_auth_and_stops_retrying():
+    """An auth rejection (bad/revoked key) must set needs_auth and stop
+    retrying immediately — hammering a revoked key with more login attempts
+    achieves nothing but audit-log spam against the appliance."""
+    transports = []
+
+    def factory(url, verify_tls, timeout):
+        ft = FakeTransport()
+        transports.append(ft)
+        return ft
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None, max_reconnect_attempts=5)
+    client.connect()
+    ft1 = transports[0]
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft1.sent)
+    req = json.loads(ft1.sent[0])
+    ft1.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    ft1.push_error(ConnectionResetError('drop'))
+    assert _wait_for(lambda: len(transports) >= 2, timeout=3)
+    ft2 = transports[1]
+    assert _wait_for(lambda: ft2.sent, timeout=3)
+    relogin_req = json.loads(ft2.sent[-1])
+    ft2.push({'jsonrpc': '2.0', 'id': relogin_req['id'],
+              'error': {'message': 'invalid api key'}})
+
+    assert _wait_for(lambda: client.needs_auth, timeout=3)
+    assert _wait_for(lambda: client._reconnecting is False, timeout=3)
+    # Only ONE reconnect socket was opened for the relogin attempt — no
+    # retry hammer against the now-known-bad key.
+    assert len(transports) == 2
+    assert not client.is_connected
+
+
+# ---------------------------------------------------------------------------
+# Regression: close() must cancel an in-flight background reconnect instead
+# of letting it resurrect the connection with a stale api_key (finding #3)
+# ---------------------------------------------------------------------------
+
+def test_close_during_backoff_sleep_cancels_pending_reconnect():
+    """Simulates the exact race from the report: the socket drops, the
+    background worker enters its backoff sleep, and close() is called
+    (e.g. because the operator just rotated the API key and saved a new
+    config) WHILE the worker is asleep. When it wakes, it must NOT open a
+    new socket and relogin with the old key — it must notice _closed and
+    give up."""
+    ft1 = FakeTransport()
+    later_transports = []
+
+    def factory(url, verify_tls, timeout):
+        # First call (the initial explicit connect()) hands out ft1.
+        # Every later call (a reconnect attempt) would hand out a fresh
+        # transport — but none should ever be requested after close().
+        ft = FakeTransport()
+        later_transports.append(ft)
+        return ft
+
+    client = TrueNASWSClient('truenas.example', 443,
+                              transport_factory=lambda *a, **k: ft1,
+                              sleep_fn=lambda s: None, max_reconnect_attempts=1)
+    client.connect()
+
+    # Force connect() to fail for every RECONNECT attempt (simulating the
+    # appliance being briefly unreachable), so _connect_with_backoff has to
+    # go through its backoff-sleep path where we'll race the close().
+    def failing_factory(url, verify_tls, timeout):
+        raise OSError('simulated: still unreachable')
+
+    client._transport_factory = failing_factory
+
+    # sleep_fn doubles as the injection point for the race: the very moment
+    # the reconnect worker sleeps between attempts, close() fires.
+    def sleep_and_close(_delay):
+        client.close()
+
+    client._sleep = sleep_and_close
+    # Use enough attempts that at least one backoff sleep happens.
+    client.max_reconnect_attempts = 3
+
+    ft1.push_error(ConnectionResetError('drop'))
+    # Wait for the one state change that can only happen after close() ran:
+    # _closed flips False->True exactly once, monotonically — a safe
+    # condition to poll for, unlike _reconnecting (which is False both
+    # before recovery starts AND after it ends, including within the same
+    # instant on a fake, sleep-free transport).
+    assert _wait_for(lambda: client._closed, timeout=3)
+    assert _wait_for(lambda: not client._reconnecting, timeout=3)
+    assert not client.is_connected
+    # The stale api_key was never used again over a resurrected socket:
+    # login() was never called from this test, so _api_key is None and
+    # there is nothing to leak — the key assertion is that connect() did
+    # NOT quietly succeed and flip is_connected back to True.
+
+
+def test_explicit_connect_reopens_after_close():
+    """A deliberate connect() call after close() must succeed and clear
+    _closed — close() is not a permanent brick, only a cancellation of
+    automatic recovery."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+    ft.push({'jsonrpc': '2.0', 'method': 'noop'})
+    client.close()
+    assert client._closed
+
+    ft2 = FakeTransport()
+    client._transport_factory = lambda *a, **k: ft2
+    client.connect()
+    assert client.is_connected
+    assert not client._closed
+    _shutdown(client, ft2)
+
+
+# ---------------------------------------------------------------------------
+# Regression: concurrent drops must not spawn duplicate reconnect workers
+# (finding #5)
+# ---------------------------------------------------------------------------
+
+def test_concurrent_disconnect_does_not_spawn_duplicate_worker(monkeypatch):
+    """Deterministic version of the race: rather than relying on real thread
+    timing (a second disconnect racing to land while the first recovery
+    thread is still mid-flight — inherently flaky to reproduce), simulate
+    "a recovery is already in progress" directly by pre-setting the guard
+    flag, then assert a second disconnect does not spawn another worker.
+    A third disconnect, once the guard is cleared (recovery finished), must
+    be free to spawn a new one."""
+    ft = FakeTransport()
+    client = _client_with(ft)
+    client.connect()
+
+    spawned = []
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            spawned.append(name)
+
+        def start(self):
+            pass  # never actually run _background_reconnect in this test
+
+    monkeypatch.setattr(threading, 'Thread', DummyThread)
+
+    # Simulate: a recovery worker is already active.
+    client._reconnecting = True
+    client._handle_unexpected_disconnect('drop while recovery in progress')
+    assert spawned == []  # guard prevented a duplicate spawn
+
+    # Once that (simulated) recovery finishes and clears the guard, a new
+    # drop is free to start a fresh worker.
+    client._reconnecting = False
+    client._handle_unexpected_disconnect('drop after recovery finished')
+    assert len(spawned) == 1
+    assert spawned[0].startswith('truenas-reconnect-')
+
+
+# ---------------------------------------------------------------------------
+# Regression: the transport must not churn reconnect/relogin every
+# ``timeout`` seconds on a perfectly idle, healthy connection (finding #6)
+# ---------------------------------------------------------------------------
+
+def test_default_transport_factory_disables_recv_timeout(monkeypatch):
+    calls = {}
+
+    class _FakeRealWS:
+        def settimeout(self, value):
+            calls['settimeout'] = value
+
+    fake_websocket_module = types.SimpleNamespace(
+        create_connection=lambda url, timeout=None, sslopt=None: _FakeRealWS())
+    monkeypatch.setitem(sys.modules, 'websocket', fake_websocket_module)
+
+    from core.ws_client import _default_transport_factory
+    ws = _default_transport_factory('wss://truenas.example:443/api/current', False, 10.0)
+
+    assert calls['settimeout'] is None
+    assert isinstance(ws, _FakeRealWS)

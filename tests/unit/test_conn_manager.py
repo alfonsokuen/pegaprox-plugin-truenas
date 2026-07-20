@@ -17,6 +17,7 @@ class _FakeClient:
         self._login_error = login_error
         self.logged_in_with = None
         self.connect_calls = 0
+        self.close_called = False
 
     def connect(self):
         self.connect_calls += 1
@@ -32,10 +33,11 @@ class _FakeClient:
 
     def close(self):
         self.is_connected = False
+        self.close_called = True
 
 
-def _instance_cfg(id_='datos-64'):
-    return {'id': id_, 'host': '192.0.2.64', 'port': 81,
+def _instance_cfg(id_='truenas-test'):
+    return {'id': id_, 'host': '192.0.2.64', 'port': 8443,
             'use_tls': True, 'verify_tls': False}
 
 
@@ -99,11 +101,11 @@ def test_is_connected_and_connection_error_reflect_client_state():
     assert mgr.is_connected('nope') is False
     assert mgr.connection_error('nope') is None
     client = mgr.get_connection(_instance_cfg())
-    assert mgr.is_connected('datos-64') is False
+    assert mgr.is_connected('truenas-test') is False
     client.is_connected = True
-    assert mgr.is_connected('datos-64') is True
+    assert mgr.is_connected('truenas-test') is True
     client.last_error = 'boom'
-    assert mgr.connection_error('datos-64') == 'boom'
+    assert mgr.connection_error('truenas-test') == 'boom'
 
 
 def test_test_connection_catches_unexpected_exception():
@@ -121,9 +123,9 @@ def test_close_removes_and_closes_single_client():
     mgr = ConnectionManager(client_factory=lambda **kw: _FakeClient(**kw))
     client = mgr.get_connection(_instance_cfg())
     client.is_connected = True
-    mgr.close('datos-64')
+    mgr.close('truenas-test')
     assert client.is_connected is False
-    assert mgr.is_connected('datos-64') is False
+    assert mgr.is_connected('truenas-test') is False
 
 
 def test_close_all_closes_every_client():
@@ -141,3 +143,90 @@ def test_close_all_closes_every_client():
         c.is_connected = True
     mgr.close_all()
     assert all(not c.is_connected for c in clients)
+
+
+# ---------------------------------------------------------------------------
+# Regression: test_connection must build a throwaway client from the exact
+# instance_cfg passed in, never reuse the id-cached client from the
+# registry — otherwise editing host/port on an already-connected instance's
+# draft and hitting "Probar conexión" silently tests the OLD host while
+# reporting success (finding #4).
+# ---------------------------------------------------------------------------
+
+def test_test_connection_never_reuses_cached_client_with_stale_host():
+    created = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+
+    # Instance "truenas-test" is already connected to host A (cached via a
+    # prior get_connection(), e.g. from an earlier real subsystem call).
+    cached = mgr.get_connection(_instance_cfg(id_='truenas-test'))
+    cached.is_connected = True
+    assert cached.host == '192.0.2.64'
+
+    # Operator edits the Settings form to a DIFFERENT host, same id, and
+    # clicks "Probar conexión" before saving.
+    edited_cfg = _instance_cfg(id_='truenas-test')
+    edited_cfg['host'] = '192.0.2.99'
+    result = mgr.test_connection(edited_cfg, 'ro-key')
+
+    assert result == {'ok': True, 'error': None}
+    # A brand-new client must have been created for the test, targeting the
+    # EDITED host — not the cached one still pointed at the old host.
+    assert len(created) == 2
+    assert created[-1].host == '192.0.2.99'
+    # The cached, registered client for this id must be untouched: still
+    # the old one, still pointed at the old host.
+    assert mgr.get_connection(_instance_cfg(id_='truenas-test')) is cached
+    assert cached.host == '192.0.2.64'
+
+
+def test_test_connection_closes_the_throwaway_client_on_success():
+    created = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+    mgr.test_connection(_instance_cfg(), 'ro-key')
+    assert created[0].close_called is True
+
+
+def test_test_connection_closes_the_throwaway_client_on_connect_error():
+    def factory(**kw):
+        return _FakeClient(connect_error=TrueNASConnectionError('refused'), **kw)
+
+    created = []
+
+    def wrapped_factory(**kw):
+        c = factory(**kw)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=wrapped_factory)
+    mgr.test_connection(_instance_cfg(), 'ro-key')
+    assert created[0].close_called is True
+
+
+def test_test_connection_does_not_register_the_throwaway_client():
+    created = []
+
+    def factory(**kwargs):
+        c = _FakeClient(**kwargs)
+        created.append(c)
+        return c
+
+    mgr = ConnectionManager(client_factory=factory)
+    mgr.test_connection(_instance_cfg(id_='never-saved'), 'ro-key')
+    # test_connection() must never populate the registry — a subsequent
+    # get_connection() for the same id creates a genuinely NEW client.
+    assert len(created) == 1
+    mgr.get_connection(_instance_cfg(id_='never-saved'))
+    assert len(created) == 2

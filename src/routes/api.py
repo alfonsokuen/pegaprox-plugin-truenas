@@ -103,7 +103,15 @@ def config_handler():
 def config_save_handler():
     if (err := _require_admin()):
         return err
-    body = request.get_json(silent=True) or {}
+    raw_body = request.get_json(silent=True)
+    if raw_body is None:
+        # get_json(silent=True) returns None for BOTH "no body" and
+        # "malformed JSON" — collapsing that to `{}` earlier made every
+        # validator fail with a misleading "instances must be a list" /
+        # "host is required" instead of telling the operator their request
+        # body simply wasn't valid JSON.
+        return jsonify({'error': 'request body must be valid JSON'}), 400
+    body = raw_body if isinstance(raw_body, dict) else {}
     old_cfg = config_store.load_config(CONFIG_PATH)
 
     instances, err = config_store.validate_instances(
@@ -116,7 +124,13 @@ def config_save_handler():
         return jsonify({'error': err}), 400
 
     cfg = {'instances': instances, 'poll': poll}
-    config_store.save_config(CONFIG_PATH, cfg)
+    try:
+        config_store.save_config(CONFIG_PATH, cfg)
+    except OSError as e:
+        # e.g. disk full, permission denied — must not escape as an
+        # unhandled 500 with no context for whoever reads the PegaProx logs.
+        log.error(f'[{PLUGIN_ID}] failed to persist config.json: {e}', exc_info=True)
+        return jsonify({'error': f'could not save config: {e}'}), 500
     # Credentials/host may have changed — drop any live sockets so the next
     # call reconnects against the freshly saved config, never a stale key.
     conn_manager.close_all()
@@ -133,7 +147,10 @@ def instances_test_handler():
     test before hitting Save)."""
     if (err := _require_admin()):
         return err
-    body = request.get_json(silent=True) or {}
+    raw_body = request.get_json(silent=True)
+    if raw_body is None:
+        return jsonify({'ok': False, 'error': 'request body must be valid JSON'}), 400
+    body = raw_body if isinstance(raw_body, dict) else {}
     cfg = config_store.load_config(CONFIG_PATH)
 
     instance_id = str(body.get('id') or '').strip()
@@ -153,6 +170,16 @@ def instances_test_handler():
         port = int(raw_port)
     except (TypeError, ValueError):
         return jsonify({'ok': False, 'error': 'port must be an integer'}), 400
+
+    # Same hard guard as config_store.validate_instances (save path): a real
+    # API key must never travel over plain ws:// — TrueNAS auto-revokes it
+    # on first use over HTTP. Without this check here, an operator could
+    # untick "use_tls" on the draft form and hit "Probar conexión" BEFORE
+    # saving, revoking their own production key with a single click.
+    if not use_tls:
+        return jsonify({'ok': False, 'error': (
+            'use_tls debe ser true si hay una API key configurada (TrueNAS '
+            'revoca la key automáticamente sobre HTTP plano)')}), 400
 
     instance_cfg = {
         'id': instance_id or f'test-{host}',
