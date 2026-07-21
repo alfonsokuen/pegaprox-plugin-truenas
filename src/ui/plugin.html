@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TrueNAS — PegaProx</title>
 <style>
+  /* Palette matched to PegaProx's own host theme (extracted from its compiled
+     Tailwind build: --color-{dark,card,border,primary,secondary}-rgb) so the
+     plugin reads as part of the panel, not a foreign iframe. --accent is
+     PegaProx's actual brand color (Proxmox orange, #e57000), not a generic
+     dashboard blue; --ok mirrors their secondary green (#238636). */
   :root {
-    --bg: #0e1116; --panel: #161b22; --border: #2a3038; --text: #e6edf3;
-    --muted: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --bg: #0f1419; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #e57000; --ok: #238636; --warn: #d29922; --err: #f85149;
     --radius: 8px;
   }
   [data-theme="cloud"] {
     --bg: #f4f6f8; --panel: #ffffff; --border: #dde3ea; --text: #1b2430;
-    --muted: #5c6b7a; --accent: #2563eb; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
+    --muted: #5c6b7a; --accent: #c2570a; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
   }
   * { box-sizing: border-box; }
   :root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
@@ -37,8 +42,8 @@
     display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
     background: var(--border); color: var(--muted); transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
   }
-  .chip.ok { background: rgba(63,185,80,.15); color: var(--ok); }
-  .chip.err { background: rgba(248,81,73,.15); color: var(--err); }
+  .chip.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .chip.err { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
   nav {
     display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid var(--border);
     overflow-x: auto;
@@ -51,6 +56,10 @@
   nav button:hover:not(:disabled):not(.active) { color: var(--text); }
   nav button.active { color: var(--text); border-bottom-color: var(--accent); }
   nav button:disabled { opacity: .45; cursor: not-allowed; }
+  .tab-icon, .card-icon {
+    fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .tab-icon { width: 15px; height: 15px; margin-right: 6px; vertical-align: -3px; }
   main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   .tab { display: none; }
   .tab.active { display: block; }
@@ -106,14 +115,22 @@
   .checkbox-field input { width: auto; }
   a.link { color: var(--accent); }
   .bento { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .stat { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .bento .card { border-top: 2px solid var(--border); transition: border-color 200ms var(--ease-out); }
+  .bento .card.stat-ok { border-top-color: var(--ok); }
+  .bento .card.stat-warn { border-top-color: var(--warn); }
+  .bento .card.stat-err { border-top-color: var(--err); }
+  .stat-label {
+    font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  }
+  .stat-label .card-icon { width: 14px; height: 14px; opacity: .7; }
+  .stat { font-size: 24px; font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
   .progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 8px; }
   .progress > div { height: 100%; background: var(--accent); transition: width 400ms var(--ease-out); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-  .badge.ONLINE, .badge.true { background: rgba(63,185,80,.15); color: var(--ok); }
-  .badge.DEGRADED, .badge.FAULTED, .badge.UNAVAIL, .badge.false { background: rgba(248,81,73,.15); color: var(--err); }
-  .badge.WARNING, .badge.NOTICE { background: rgba(210,153,34,.15); color: var(--warn); }
+  .badge.ONLINE, .badge.true { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .badge.DEGRADED, .badge.FAULTED, .badge.UNAVAIL, .badge.false { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+  .badge.WARNING, .badge.NOTICE { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
   .subtab-hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
   .loading {
     color: var(--muted); padding: 12px 0; position: relative; overflow: hidden;
@@ -134,14 +151,14 @@
 </header>
 
 <nav id="tabs">
-  <button data-tab="overview" class="active">Overview</button>
-  <button data-tab="pools">Pools &amp; Discos</button>
-  <button data-tab="datasets">Datasets</button>
-  <button data-tab="snapshots">Snapshots</button>
-  <button data-tab="shares">Shares</button>
-  <button data-tab="replication">Replicación</button>
-  <button data-tab="apps">Apps/VMs</button>
-  <button data-tab="settings">Settings</button>
+  <button data-tab="overview" class="active"><svg class="tab-icon" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Overview</button>
+  <button data-tab="pools"><svg class="tab-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Pools &amp; Discos</button>
+  <button data-tab="datasets"><svg class="tab-icon" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>Datasets</button>
+  <button data-tab="snapshots"><svg class="tab-icon" viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h6L16 8h4a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>Snapshots</button>
+  <button data-tab="shares"><svg class="tab-icon" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="18" cy="18" r="2.2"/><path d="M8 11l8-4M8 13l8 4"/></svg>Shares</button>
+  <button data-tab="replication"><svg class="tab-icon" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>Replicación</button>
+  <button data-tab="apps"><svg class="tab-icon" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M4.5 7.5L12 12l7.5-4.5M12 12v9"/></svg>Apps/VMs</button>
+  <button data-tab="settings"><svg class="tab-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.4 7.4 0 0 0 0-2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-1.7-1L15 3h-4l-.3 2.6a7.7 7.7 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.7 7.7 0 0 0 1.7 1L11 21h4l.3-2.6a7.7 7.7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5z"/></svg>Settings</button>
 </nav>
 
 <main>
@@ -246,6 +263,17 @@
       <div class="checkbox-field"><input type="checkbox" id="f-tls" checked><label for="f-tls" style="margin:0">use_tls (obligatorio con API key)</label></div>
       <div class="checkbox-field"><input type="checkbox" id="f-verify"><label for="f-verify" style="margin:0">verify_tls</label></div>
       <div class="checkbox-field"><input type="checkbox" id="f-readonly" checked><label for="f-readonly" style="margin:0">readonly (kill-switch de escritura)</label></div>
+      <button type="button" class="btn secondary" id="btn-toggle-advanced" style="margin-bottom:10px">Opciones avanzadas ▾</button>
+      <div id="advanced-fields" hidden>
+        <div class="field">
+          <label>API key (RW) — habilita create/update/delete de datasets y snapshots</label>
+          <input type="text" id="f-key-rw" placeholder="***">
+        </div>
+        <div class="field">
+          <label>tls_server_name — nombre del certificado, si el host se marca por IP</label>
+          <input type="text" id="f-tls-name" placeholder="p.ej. nas.miempresa.com">
+        </div>
+      </div>
       <div class="row-actions">
         <button class="btn secondary" id="btn-test">Probar conexión</button>
         <button class="btn" id="btn-save-instance">Guardar</button>
@@ -386,12 +414,26 @@
     document.getElementById('f-host').value = inst ? inst.host : '';
     document.getElementById('f-port').value = inst ? inst.port : 443;
     document.getElementById('f-key').value = inst && inst.api_key_ro ? inst.api_key_ro : '';
+    document.getElementById('f-key-rw').value = inst && inst.api_key_rw ? inst.api_key_rw : '';
+    document.getElementById('f-tls-name').value = inst && inst.tls_server_name ? inst.tls_server_name : '';
     document.getElementById('f-tls').checked = inst ? !!inst.use_tls : true;
     document.getElementById('f-verify').checked = inst ? !!inst.verify_tls : false;
     document.getElementById('f-readonly').checked = inst ? !!inst.readonly : true;
     document.getElementById('test-result').textContent = '';
     document.getElementById('test-result').className = '';
+    // Auto-expand advanced fields when editing an instance that already has
+    // something set there — an operator revisiting an RW-enabled instance
+    // shouldn't have to know to click "Opciones avanzadas" first.
+    var hasAdvanced = !!((inst && inst.api_key_rw) || (inst && inst.tls_server_name));
+    document.getElementById('advanced-fields').hidden = !hasAdvanced;
+    document.getElementById('btn-toggle-advanced').textContent = hasAdvanced ? 'Opciones avanzadas ▴' : 'Opciones avanzadas ▾';
   }
+
+  document.getElementById('btn-toggle-advanced').addEventListener('click', function () {
+    var box = document.getElementById('advanced-fields');
+    box.hidden = !box.hidden;
+    this.textContent = box.hidden ? 'Opciones avanzadas ▾' : 'Opciones avanzadas ▴';
+  });
 
   function closeForm() {
     document.getElementById('instance-form-card').hidden = true;
@@ -409,7 +451,8 @@
       use_tls: document.getElementById('f-tls').checked,
       verify_tls: document.getElementById('f-verify').checked,
       api_key_ro: document.getElementById('f-key').value,
-      api_key_rw: null,
+      api_key_rw: document.getElementById('f-key-rw').value || null,
+      tls_server_name: document.getElementById('f-tls-name').value.trim() || null,
       readonly: document.getElementById('f-readonly').checked,
     };
   }
@@ -601,6 +644,13 @@
     return '<div class="subtab-hint">actualizado ' + hh + ':' + mm + ':' + ss + '</div>';
   }
 
+  var ICONS = {
+    system: '<svg class="card-icon" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>',
+    pools: '<svg class="card-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+    alerts: '<svg class="card-icon" viewBox="0 0 24 24"><path d="M12 3a5 5 0 0 0-5 5v3.5c0 .8-.3 1.5-.8 2.1L5 16h14l-1.2-2.4a3.5 3.5 0 0 1-.8-2.1V8a5 5 0 0 0-5-5z"/><path d="M9.5 19a2.5 2.5 0 0 0 5 0"/></svg>',
+    version: '<svg class="card-icon" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z"/></svg>',
+  };
+
   function renderOverview(body, sysRes, poolsRes) {
     body.className = '';
     if (sysRes.status !== 200 || poolsRes.status !== 200) {
@@ -615,17 +665,20 @@
     var poolList = pools.pools || [];
     var scanning = poolList.filter(function (p) { return p.scan && p.scan.state === 'SCANNING'; });
 
+    var alertCount = (sys.alerts || []).length;
+    var alertClass = alertCount ? (sys.alerts.some(function (a) { return a.level === 'CRITICAL'; }) ? 'stat-err' : 'stat-warn') : 'stat-ok';
+
     var html = updatedAtHtml();
     html += '<div class="bento">';
-    html += '<div class="card"><div class="stat-label">Sistema</div>' +
+    html += '<div class="card ' + (health.healthy ? 'stat-ok' : 'stat-err') + '"><div class="stat-label">' + ICONS.system + 'Sistema</div>' +
       '<div class="stat">' + badge(health.healthy ? 'ONLINE' : 'DEGRADED') + '</div>' +
       '<div>' + esc(health.summary || '') + '</div></div>';
-    html += '<div class="card"><div class="stat-label">Pools</div>' +
+    html += '<div class="card ' + (poolHealth.healthy ? 'stat-ok' : 'stat-err') + '"><div class="stat-label">' + ICONS.pools + 'Pools</div>' +
       '<div class="stat">' + badge(poolHealth.healthy ? 'ONLINE' : 'DEGRADED') + '</div>' +
       '<div>' + esc(poolHealth.summary || '') + '</div></div>';
-    html += '<div class="card"><div class="stat-label">Alertas activas</div>' +
-      '<div class="stat">' + (sys.alerts || []).length + '</div></div>';
-    html += '<div class="card"><div class="stat-label">Versión</div>' +
+    html += '<div class="card ' + alertClass + '"><div class="stat-label">' + ICONS.alerts + 'Alertas activas</div>' +
+      '<div class="stat">' + alertCount + '</div></div>';
+    html += '<div class="card"><div class="stat-label">' + ICONS.version + 'Versión</div>' +
       '<div class="stat" style="font-size:14px">' + esc((sys.info || {}).version || '?') + '</div>' +
       '<div>' + esc((sys.info || {}).hostname || '') + '</div></div>';
     html += '</div>';
