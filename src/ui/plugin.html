@@ -15,22 +15,27 @@
     --muted: #5c6b7a; --accent: #2563eb; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
   }
   * { box-sizing: border-box; }
+  :root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
+  ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
   header {
     display: flex; align-items: center; gap: 12px; padding: 14px 20px;
     border-bottom: 1px solid var(--border);
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
   #instance-select {
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 6px 10px; min-width: 240px;
+    transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
   }
+  #instance-select:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
   .chip {
     display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
-    background: var(--border); color: var(--muted);
+    background: var(--border); color: var(--muted); transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
   }
   .chip.ok { background: rgba(63,185,80,.15); color: var(--ok); }
   .chip.err { background: rgba(248,81,73,.15); color: var(--err); }
@@ -41,7 +46,9 @@
   nav button {
     background: none; border: none; color: var(--muted); padding: 10px 14px;
     cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent;
+    transition: color 150ms var(--ease-out), border-color 150ms var(--ease-out);
   }
+  nav button:hover:not(:disabled):not(.active) { color: var(--text); }
   nav button.active { color: var(--text); border-bottom-color: var(--accent); }
   nav button:disabled { opacity: .45; cursor: not-allowed; }
   main { padding: 20px; max-width: 1100px; margin: 0 auto; }
@@ -64,17 +71,29 @@
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
   th { color: var(--muted); font-weight: 500; }
+  tbody tr { transition: background 120ms var(--ease-out); }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .row-actions { display: flex; gap: 8px; }
   button.btn {
     background: var(--accent); color: #fff; border: none; border-radius: 6px;
     padding: 7px 12px; font-size: 13px; cursor: pointer;
+    transition: transform 120ms var(--ease-out), opacity 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
   }
+  button.btn:hover:not(:disabled) { opacity: .92; }
+  button.btn:active:not(:disabled) { transform: scale(.97); }
   button.btn.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.btn.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  button.btn:focus-visible, nav button:focus-visible, #instance-select:focus-visible,
+  input[type="text"]:focus-visible, input[type="number"]:focus-visible, input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
   input[type="text"], input[type="number"] {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 100%;
+    transition: border-color 150ms var(--ease-out);
   }
+  input[type="text"]:hover, input[type="number"]:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .field { margin-bottom: 10px; }
   .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -87,16 +106,24 @@
   .checkbox-field input { width: auto; }
   a.link { color: var(--accent); }
   .bento { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .stat { font-size: 22px; font-weight: 600; }
+  .stat { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .progress { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 8px; }
-  .progress > div { height: 100%; background: var(--accent); }
+  .progress > div { height: 100%; background: var(--accent); transition: width 400ms var(--ease-out); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
   .badge.ONLINE, .badge.true { background: rgba(63,185,80,.15); color: var(--ok); }
   .badge.DEGRADED, .badge.FAULTED, .badge.UNAVAIL, .badge.false { background: rgba(248,81,73,.15); color: var(--err); }
   .badge.WARNING, .badge.NOTICE { background: rgba(210,153,34,.15); color: var(--warn); }
   .subtab-hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-  .loading { color: var(--muted); font-style: italic; padding: 12px 0; }
+  .loading {
+    color: var(--muted); padding: 12px 0; position: relative; overflow: hidden;
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
+    background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -107,18 +134,18 @@
 </header>
 
 <nav id="tabs">
-  <button data-tab="overview">Overview</button>
+  <button data-tab="overview" class="active">Overview</button>
   <button data-tab="pools">Pools &amp; Discos</button>
   <button data-tab="datasets">Datasets</button>
   <button data-tab="snapshots">Snapshots</button>
   <button data-tab="shares">Shares</button>
   <button data-tab="replication">Replicación</button>
   <button data-tab="apps">Apps/VMs</button>
-  <button data-tab="settings" class="active">Settings</button>
+  <button data-tab="settings">Settings</button>
 </nav>
 
 <main>
-  <section class="tab" id="tab-overview"><div id="ov-body" class="empty">Elegí una instancia arriba para ver su estado.</div></section>
+  <section class="tab active" id="tab-overview"><div id="ov-body" class="empty">Elegí una instancia arriba para ver su estado.</div></section>
   <section class="tab" id="tab-pools"><div id="pools-body" class="empty">Elegí una instancia arriba para ver sus pools.</div></section>
   <section class="tab" id="tab-datasets">
     <div class="toolbar">
@@ -193,7 +220,7 @@
     <div id="apps-body" class="empty">Elegí una instancia arriba.</div>
   </section>
 
-  <section class="tab active" id="tab-settings">
+  <section class="tab" id="tab-settings">
     <div class="toolbar">
       <h2 style="margin:0;font-size:15px;">Instancias configuradas</h2>
       <button class="btn" id="btn-new-instance">+ Nueva instancia</button>
