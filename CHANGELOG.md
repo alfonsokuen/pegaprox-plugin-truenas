@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.10.2] - 2026-07-21 (fail fast on a permanently-expired TLS cert)
+
+Root-caused the operator's "`.64` no me carga datos" + the recurring
+"Unexpected token '<' ... not valid JSON" browser error, which turned
+out to be the SAME bug, not two separate ones.
+
+- `.64`'s TLS certificate expired 2026-07-21. `use_tls`+`verify_tls` are
+  both `true` for that instance, so every connection attempt fails with
+  `ssl.SSLCertVerificationError`. Before this fix, `_connect_with_backoff`
+  treated that exactly like a transient blip and retried the FULL
+  5-attempt exponential-backoff cycle — measured live: **~14.5s** just to
+  fail, on every single request to that instance.
+- Confirmed live (`curl` through the real public domain, not just
+  localhost) that this plugin's own Flask route always returns a
+  correct, well-formed JSON 502 — the bug was never in this plugin's
+  response body. But 14.5s was slow enough that Cloudflare's tunnel gave
+  up on the request FIRST and returned its own error page (plain-text
+  "error code: 502" to a bare `curl`, an HTML page to a browser) —
+  THAT'S what the operator's browser tried to `.json()`-parse, producing
+  "Unexpected token '<'". Nothing wrong with this plugin's JSON; the
+  request just never got there fast enough.
+- Fix: `TrueNASConnectionError` now carries `retryable` (default `True`).
+  `ws_client.connect()` sets it `False` when the transport factory's
+  exception is (or mentions) a certificate verification failure —
+  `_is_permanent_tls_failure()` checks both `isinstance(...,
+  ssl.SSLCertVerificationError)` and a lowercase substring fallback (in
+  case a future `websocket-client` version wraps it differently).
+  `_connect_with_backoff` now gives up after the FIRST attempt for a
+  non-retryable error instead of burning the whole backoff cycle — an
+  expired-cert instance now fails in roughly one connection attempt's
+  worth of time, not ~15-20s.
+- Every OTHER connection failure (refused, timeout, DNS, a transient
+  network blip) is unaffected — still retries with the existing backoff.
+- 6 new tests (`ws_client`) — 363 tests total.
+
 ## [0.10.1] - 2026-07-21 (QA hardening on 0.10.0's parallel_safe_calls)
 
 Fable code audit of 0.10.0 (GO, max severity P3) found two cheap gaps,

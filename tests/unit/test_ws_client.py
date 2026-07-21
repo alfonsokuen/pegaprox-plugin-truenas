@@ -20,7 +20,7 @@ from core.errors import (
     TrueNASRPCError,
     TrueNASTimeoutError,
 )
-from core.ws_client import TrueNASWSClient
+from core.ws_client import TrueNASWSClient, _is_permanent_tls_failure
 
 
 class FakeTransport:
@@ -321,6 +321,84 @@ def test_connect_with_backoff_raises_after_exhausting_attempts():
     with pytest.raises(TrueNASConnectionError):
         client._connect_with_backoff(max_attempts=3)
     assert not client.is_connected
+
+
+# ---------------------------------------------------------------------------
+# Permanent TLS failures (expired/invalid cert) fail fast, no backoff burn
+# ---------------------------------------------------------------------------
+
+def test_expired_certificate_gives_up_after_a_single_attempt_no_sleep():
+    """Found live 2026-07-21: retrying an expired cert 5 times with growing
+    backoff turned one permanently-broken instance into a ~15-20s wait on
+    EVERY request to it — slow enough that Cloudflare's tunnel returned its
+    own error page before this plugin's own (correct) JSON 502 ever
+    arrived. A cert failure can never be fixed by retrying, so it must not
+    pay the backoff loop at all."""
+    import ssl
+
+    attempts = {'n': 0}
+    sleeps = []
+
+    def factory(url, verify_tls, timeout, tls_server_name=None):
+        attempts['n'] += 1
+        raise ssl.SSLCertVerificationError('certificate verify failed: certificate has expired')
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: sleeps.append(s))
+    with pytest.raises(TrueNASConnectionError):
+        client._connect_with_backoff(max_attempts=5)
+    assert attempts['n'] == 1
+    assert sleeps == []
+
+
+def test_non_ssl_exception_mentioning_expired_certificate_also_fails_fast():
+    """String-fallback path: some transport versions may wrap the SSL error
+    in a different exception type without preserving the class."""
+    attempts = {'n': 0}
+
+    def factory(url, verify_tls, timeout, tls_server_name=None):
+        attempts['n'] += 1
+        raise RuntimeError('[SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired')
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None)
+    with pytest.raises(TrueNASConnectionError):
+        client._connect_with_backoff(max_attempts=5)
+    assert attempts['n'] == 1
+
+
+def test_is_permanent_tls_failure_detects_ssl_cert_verification_error():
+    import ssl
+    assert _is_permanent_tls_failure(
+        ssl.SSLCertVerificationError('certificate verify failed')) is True
+
+
+def test_is_permanent_tls_failure_string_fallback_case_insensitive():
+    assert _is_permanent_tls_failure(RuntimeError('Certificate Has Expired')) is True
+    assert _is_permanent_tls_failure(
+        RuntimeError('[SSL: CERTIFICATE_VERIFY_FAILED] whatever')) is True
+
+
+def test_is_permanent_tls_failure_false_for_unrelated_errors():
+    assert _is_permanent_tls_failure(RuntimeError('connection refused')) is False
+    assert _is_permanent_tls_failure(OSError('timed out')) is False
+
+
+def test_ordinary_connection_refused_still_retries_with_backoff():
+    """A transient failure (unrelated to certs) must keep its existing
+    retry-with-backoff behavior — this fix only fast-fails permanent TLS
+    errors, nothing else."""
+    attempts = {'n': 0}
+
+    def factory(url, verify_tls, timeout, tls_server_name=None):
+        attempts['n'] += 1
+        raise RuntimeError('connection refused (simulated)')
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None)
+    with pytest.raises(TrueNASConnectionError):
+        client._connect_with_backoff(max_attempts=4)
+    assert attempts['n'] == 4
 
 
 def test_lazy_connect_never_touches_network_at_construction():

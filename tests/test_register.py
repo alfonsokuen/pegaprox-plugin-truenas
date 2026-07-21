@@ -29,6 +29,6 @@ def test_plugin_id_matches_manifest(plugin):
     with open(manifest_path) as f:
         manifest = json.load(f)
     assert plugin.PLUGIN_ID == 'truenas'
-    assert manifest['version'] == '0.10.1'
+    assert manifest['version'] == '0.10.2'
     assert manifest['has_frontend'] is True
     assert manifest['frontend_route'] == 'ui'

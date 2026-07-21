@@ -12,7 +12,24 @@ class TrueNASError(Exception):
 
 
 class TrueNASConnectionError(TrueNASError):
-    """The WebSocket could not be opened, or dropped mid-call."""
+    """The WebSocket could not be opened, or dropped mid-call.
+
+    ``retryable`` defaults ``True`` (a dropped socket, DNS hiccup, or
+    "connection refused" is worth retrying with backoff). Set ``False``
+    for a failure retrying can never fix — right now that's specifically
+    an expired/invalid TLS certificate (see ``ws_client.connect()``):
+    every one of the 5 default reconnect attempts would fail identically,
+    each still paying the exponential backoff delay, turning one
+    permanently-broken instance into a ~15-20s wait on every single
+    request to it (found live 2026-07-21: an expired cert on one
+    instance was slow enough to make Cloudflare's tunnel return its own
+    error page before this plugin's own — correct — JSON 502 ever
+    arrived, which is what actually produced the "Unexpected token '<'"
+    the operator saw, not a bug in this plugin's JSON responses)."""
+
+    def __init__(self, message, retryable=True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class TrueNASTimeoutError(TrueNASError):

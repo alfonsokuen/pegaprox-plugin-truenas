@@ -119,6 +119,36 @@ def _default_transport_factory(url, verify_tls, timeout, tls_server_name=None):
     return ws
 
 
+_PERMANENT_TLS_FAILURE_MARKERS = (
+    'certificate_verify_failed',
+    'certificate has expired',
+    'certificate is not yet valid',
+)
+
+
+def _is_permanent_tls_failure(exc):
+    """True if ``exc`` is (or wraps) a TLS certificate verification failure
+    — retrying can never fix an expired/not-yet-valid/untrusted cert, only
+    replacing the certificate on the TrueNAS side can. Every OTHER
+    connection failure (refused, timeout, DNS, a transient network blip)
+    stays retryable.
+
+    Checked two ways: ``isinstance`` against ``ssl.SSLCertVerificationError``
+    (the precise, version-stable signal on the versions of Python this
+    plugin targets) AND a lowercase substring match on ``str(exc)`` as a
+    fallback, in case a future ``websocket-client`` version wraps the SSL
+    error in a different exception type without preserving the class —
+    found live 2026-07-21: an expired cert made every request to that
+    instance retry the full 5-attempt backoff cycle (~15-20s) before
+    failing, slow enough that Cloudflare's tunnel returned its own error
+    page ahead of this plugin's own (correct) JSON 502.
+    """
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _PERMANENT_TLS_FAILURE_MARKERS)
+
+
 class TrueNASWSClient:
     """Persistent JSON-RPC 2.0 client for one TrueNAS instance's WebSocket.
 
@@ -259,7 +289,9 @@ class TrueNASWSClient:
                     self.url(), self.verify_tls, self.timeout, self.tls_server_name)
             except Exception as e:
                 self._last_error = str(e)
-                raise TrueNASConnectionError(f'could not connect to {self.host}:{self.port}: {e}') from e
+                raise TrueNASConnectionError(
+                    f'could not connect to {self.host}:{self.port}: {e}',
+                    retryable=not _is_permanent_tls_failure(e)) from e
             self._connected = True
             if _clear_closed:
                 self._closed = False  # explicit (re)connect always clears a prior close()
@@ -331,6 +363,14 @@ class TrueNASWSClient:
             except TrueNASConnectionError as e:
                 last_exc = e
                 if self._closed:
+                    raise
+                if not e.retryable:
+                    # A permanent failure (e.g. an expired TLS cert) will
+                    # fail identically on every remaining attempt — bail
+                    # immediately instead of paying the full backoff cycle
+                    # (up to ~15-20s) for a retry that can never succeed.
+                    log.warning(f'[truenas] connect to {self.host}:{self.port} failed '
+                                f'with a non-retryable error, giving up immediately: {e}')
                     raise
                 if attempt < attempts - 1:
                     delay = min(self.backoff_cap_s, self.backoff_base_s * (2 ** attempt))
