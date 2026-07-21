@@ -10,7 +10,7 @@ register new verbs):
   POST instances/test                      -> connect+login only      (admin)
   GET  system|pools|datasets|snapshots|
        shares|replication|apps_vms|
-       services                            -> subsystem read (F1/F4a) (storage.view)
+       services|data_protection            -> subsystem read (F1/F4a/F6) (storage.view)
   GET  fleet                               -> cross-instance summary (F3) (storage.view)
 
 Every F1 subsystem route takes ``instance_id`` as a QUERY PARAM (e.g.
@@ -54,6 +54,7 @@ import subsystems.fleet as fleet_mod
 import subsystems.services as services_mod
 import subsystems.snapshots as snapshots_mod
 from subsystems.apps_vms import apps_vms as apps_vms_subsystem
+from subsystems.data_protection import data_protection as data_protection_subsystem
 from subsystems.datasets import datasets as datasets_subsystem
 from subsystems.pools import list_disks as pools_list_disks
 from subsystems.pools import pools as pools_subsystem
@@ -390,6 +391,10 @@ def apps_vms_handler():
 
 def services_handler():
     return _subsystem_route(services_subsystem.list)
+
+
+def data_protection_handler():
+    return _subsystem_route(data_protection_subsystem.list)
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1026,7 @@ ROUTES = {
     'replication': replication_handler,
     'apps_vms': apps_vms_handler,
     'services': services_handler,
+    'data_protection': data_protection_handler,
     'fleet': fleet_handler,
     'writes/dry-run': writes_dry_run_handler,
     'writes/execute': writes_execute_handler,

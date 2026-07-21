@@ -1271,3 +1271,24 @@ def test_writes_execute_app_stop_reports_verify_failed_if_still_running(
     _, payload = resp
     assert payload['ok'] is False
     assert payload['status'] == 'pending'  # app.stop returned an int job id
+
+
+# ---------------------------------------------------------------------------
+# F6: data protection posture (read-only) — cloudsync/rsync/certificates.
+# ---------------------------------------------------------------------------
+
+def test_data_protection_handler_returns_projected_data(plugin, tmp_plugin_dir, monkeypatch):
+    _seed_instance(routes_api.CONFIG_PATH)
+    monkeypatch.setattr(routes_api.request, 'args', {'instance_id': 'truenas-test'})
+    fake_conn = FakeConn({
+        'cloudsync.query': [{'id': 3, 'description': 'nc-sync', 'path': '/x',
+                              'enabled': True, 'schedule': {}, 'direction': 'PUSH',
+                              'credentials': {'provider': {'key': 'SECRET-SHOULD-NOT-LEAK'}}}],
+        'rsynctask.query': [],
+        'certificate.query': [],
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_connection', lambda inst: fake_conn)
+    resp = routes_api.data_protection_handler()
+    _, payload = resp
+    assert payload['data']['cloudsync'][0]['description'] == 'nc-sync'
+    assert 'SECRET-SHOULD-NOT-LEAK' not in str(payload)

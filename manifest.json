@@ -1,8 +1,8 @@
 {
   "name": "TrueNAS",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": "IDKMANAGER",
-  "description": "Monitors and controls one or more TrueNAS SCALE instances from the PegaProx panel (TrueCommand-style): pools/disks health, resilver/scrub progress, datasets, snapshots, shares, replication, apps/VMs and services over the JSON-RPC 2.0 WebSocket API. F2: real writes for datasets/zvols + snapshots. F3: cross-instance Fleet Overview. F4: service status + start/stop/restart. F5: VM start/stop/restart + App start/stop/redeploy. All writes behind dry-run/confirm/verify/audit.",
+  "description": "Monitors and controls one or more TrueNAS SCALE instances from the PegaProx panel (TrueCommand-style): pools/disks health, resilver/scrub progress, datasets, snapshots, shares, replication, apps/VMs, services and data-protection posture (cloudsync/rsync/certificates) over the JSON-RPC 2.0 WebSocket API. F2: real writes for datasets/zvols + snapshots. F3: cross-instance Fleet Overview. F4: service status + start/stop/restart. F5: VM/App lifecycle. F6: cloudsync/rsync/certificate posture (secrets redacted). All writes behind dry-run/confirm/verify/audit.",
   "min_pegaprox": "0.9.9.3",
   "license": "MIT",
   "has_frontend": true,

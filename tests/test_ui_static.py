@@ -168,3 +168,23 @@ def test_apps_never_offer_a_restart_op_only_redeploy():
     assert "var APP_OP_LABEL = { start: 'Iniciar', stop: 'Detener', redeploy: 'Redeploy' };" in html
     assert "(running ? ['stop', 'redeploy'] : ['start'])" in html
     assert "(running ? ['stop', 'restart'] : ['start'])" in html
+
+
+def test_data_protection_tab_exists_and_is_wired():
+    """F6 (2026-07-20): cloudsync/rsync/certificate posture tab."""
+    html = _read_ui()
+    assert 'data-tab="data-protection"' in html
+    assert 'id="tab-data-protection"' in html
+    assert "'data-protection': 'data-protection-body'" in html
+    assert "'data-protection': 'data_protection'" in html
+    assert 'function renderDataProtection(body, data)' in html
+
+
+def test_data_protection_tab_never_renders_raw_credentials_or_keys():
+    """The backend already strips secrets (see data_protection.py), but the
+    UI must also never reference the raw fields as a defense-in-depth
+    regression guard — it should only read the projected fields."""
+    html = _read_ui()
+    section = html.split('function renderDataProtection(body, data)')[1].split('function renderSimpleTable')[0]
+    for forbidden in ['.credentials', '.privatekey', '.certificate)', 't.CSR', 'chain_list']:
+        assert forbidden not in section

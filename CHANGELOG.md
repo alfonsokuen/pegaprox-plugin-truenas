@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.7.0] - 2026-07-20 (F6: data-protection posture — with a real secret-leak catch)
+
+Third item of the 4-item batch (charts, F4c, F5, F6). Read-only, no
+privilege grant needed — the RO key already had `CLOUD_SYNC_READ`/
+`SHARING_READ`-adjacent roles that expose `cloudsync.query`/
+`rsynctask.query`/`certificate.query`. `smart.test.results` (originally
+planned for this phase) was DROPPED after live verification: there is no
+`smart.*` method namespace at all on this TrueNAS version — not gated by a
+missing role, the API surface doesn't exist. Not built rather than guessed.
+
+**Real finding, not a style choice**: live-verified against `.64` that
+`cloudsync.query`'s raw record embeds the cloud provider's credential
+**with the secret key in cleartext** (a real Backblaze B2 application key
+under `credentials.provider.key`), and `certificate.query`'s raw record
+embeds the certificate's **private key in cleartext** (`privatekey`, full
+PEM) alongside the public cert/chain/CSR. Every other subsystem in this
+plugin deliberately does attrs-passthrough (brief §2) — doing that here
+would have leaked a real secret to anyone with `storage.view` on the
+PegaProx panel, not just admins. `subsystems/data_protection.py` breaks
+that convention on purpose: every function returns an explicit ALLOW-LIST
+of fields (schedule/path/enabled/last-run for cloudsync/rsync; name/
+common/san/expiry for certificates) and never the raw record. Job
+sub-objects (last-run info) are projected too, not embedded whole — a real
+job's `logs_excerpt` can run to megabytes (same issue F3's fleet.py hit).
+Tests assert the secret strings are ABSENT from the output, not just that
+safe fields are present.
+
+- New "Protección" tab: Cloudsync/Rsync task tables (enabled, schedule,
+  last run) + Certificates table (common name, expiry, EXPIRADO/OK badge).
+- 318 tests (up from 307).
+
 ## [0.6.0] - 2026-07-20 (F5: VM start/stop/restart + App start/stop/redeploy)
 
 Part of a 4-item batch the operator approved before publishing the plugin
