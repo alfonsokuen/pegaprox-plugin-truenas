@@ -25,7 +25,7 @@ issue) — embedding it here would blow up this route's response size for
 no benefit this feature needs (last state/time/error, not the full log).
 """
 
-from core.subsystem import Subsystem, safe_call
+from core.subsystem import Subsystem, parallel_safe_calls
 
 _CLOUDSYNC_FIELDS = ('id', 'description', 'path', 'enabled', 'schedule', 'direction')
 _RSYNC_FIELDS = ('id', 'path', 'remotehost', 'remoteport', 'direction', 'enabled', 'schedule')
@@ -75,16 +75,18 @@ class DataProtectionSubsystem(Subsystem):
     SUBSYSTEM_ID = 'data_protection'
 
     def list(self, conn):
-        """Each collection fetched independently via ``safe_call`` — a
-        failing ``certificate.query`` must not also hide cloudsync/rsync
-        task status, same isolation rule as every other multi-call
-        subsystem in this plugin."""
-        cloudsync, cloudsync_error = safe_call(
-            'cloudsync.query', lambda: cloudsync_tasks(conn), [])
-        rsync, rsync_error = safe_call(
-            'rsynctask.query', lambda: rsync_tasks(conn), [])
-        certs, certs_error = safe_call(
-            'certificate.query', lambda: certificates(conn), [])
+        """Each collection fetched independently AND concurrently
+        (``parallel_safe_calls``, perf finding 2026-07-21) — a failing
+        ``certificate.query`` must not also hide cloudsync/rsync task
+        status, same isolation rule as every other multi-call subsystem
+        in this plugin, now without paying three sequential round-trips
+        for three independent reads."""
+        (cloudsync, cloudsync_error), (rsync, rsync_error), (certs, certs_error) = \
+            parallel_safe_calls([
+                ('cloudsync.query', lambda: cloudsync_tasks(conn), []),
+                ('rsynctask.query', lambda: rsync_tasks(conn), []),
+                ('certificate.query', lambda: certificates(conn), []),
+            ])
         return {
             'cloudsync': cloudsync, 'cloudsync_error': cloudsync_error,
             'rsync': rsync, 'rsync_error': rsync_error,

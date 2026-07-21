@@ -32,7 +32,7 @@ proves ``vm.query`` 404s/errors and ``virt.instance.query`` is what answers
 instead — don't build it blind now.
 """
 
-from core.subsystem import Subsystem, safe_call
+from core.subsystem import Subsystem, parallel_safe_calls
 from core.ws_client import WRITE_TIMEOUT
 
 _VM_OPS = ('start', 'stop', 'restart')
@@ -64,9 +64,12 @@ class AppsVmsSubsystem(Subsystem):
         namespace is the one flagged as unstable across TrueNAS versions
         (see module docstring), so a failure there must not also hide
         `apps`, which responded fine (silent-failure-hunter finding, F1
-        review round 2)."""
-        apps, apps_error = safe_call('app.query', lambda: list_apps(conn), [])
-        vms, vms_error = safe_call('vm.query', lambda: list_vms(conn), [])
+        review round 2). Fetched CONCURRENTLY (perf finding 2026-07-21) —
+        two independent reads no longer pay two sequential round-trips."""
+        (apps, apps_error), (vms, vms_error) = parallel_safe_calls([
+            ('app.query', lambda: list_apps(conn), []),
+            ('vm.query', lambda: list_vms(conn), []),
+        ])
         return {'apps': apps, 'apps_error': apps_error, 'vms': vms, 'vms_error': vms_error}
 
 

@@ -47,7 +47,7 @@ a failing ``iscsi.*`` query (silent-failure-hunter finding, F1 review round
 kind gets a ``<kind>_error`` key alongside it (``None`` on success).
 """
 
-from core.subsystem import ConfirmationRequired, Subsystem, safe_call
+from core.subsystem import ConfirmationRequired, Subsystem, parallel_safe_calls
 from core.ws_client import WRITE_TIMEOUT
 
 
@@ -76,16 +76,20 @@ class SharesSubsystem(Subsystem):
 
     def list(self, conn):
         """Returns a dict, not a flat list — see module docstring. Each of
-        the five collections degrades independently (safe_call) — one
-        failing kind never hides the others."""
-        smb, smb_error = safe_call('sharing.smb.query', lambda: list_smb(conn), [])
-        nfs, nfs_error = safe_call('sharing.nfs.query', lambda: list_nfs(conn), [])
-        targets, targets_error = safe_call(
-            'iscsi.target.query', lambda: list_iscsi_targets(conn), [])
-        extents, extents_error = safe_call(
-            'iscsi.extent.query', lambda: list_iscsi_extents(conn), [])
-        targetextents, targetextents_error = safe_call(
-            'iscsi.targetextent.query', lambda: list_iscsi_targetextents(conn), [])
+        the five collections degrades independently AND is fetched
+        CONCURRENTLY (``parallel_safe_calls`` — perf finding 2026-07-21:
+        five sequential round-trips for five independent reads was the
+        single biggest contributor to a slow Shares tab). One failing
+        kind still never hides the others."""
+        (smb, smb_error), (nfs, nfs_error), \
+            (targets, targets_error), (extents, extents_error), \
+            (targetextents, targetextents_error) = parallel_safe_calls([
+                ('sharing.smb.query', lambda: list_smb(conn), []),
+                ('sharing.nfs.query', lambda: list_nfs(conn), []),
+                ('iscsi.target.query', lambda: list_iscsi_targets(conn), []),
+                ('iscsi.extent.query', lambda: list_iscsi_extents(conn), []),
+                ('iscsi.targetextent.query', lambda: list_iscsi_targetextents(conn), []),
+            ])
         return {
             'smb': smb, 'smb_error': smb_error,
             'nfs': nfs, 'nfs_error': nfs_error,

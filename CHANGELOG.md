@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.10.0] - 2026-07-21 (perf: parallelize multi-collection reads)
+
+Operator reported the plugin felt slow to load/sync after onboarding a
+second instance (`nvmeof-253`) and while chasing an unrelated SSE
+hiccup. Root cause for the multi-collection tabs specifically: four
+routes each made several INDEPENDENT TrueNAS RPCs back-to-back, paying
+one full WebSocket round-trip per call instead of one round-trip total.
+
+- New `core.subsystem.parallel_safe_calls(specs)`: runs several
+  `safe_call`-shaped `(label, fn, default)` specs CONCURRENTLY via a
+  small `ThreadPoolExecutor`, same isolation semantics as sequential
+  `safe_call` (one failing spec still degrades independently, never
+  hides the others) — safe because `TrueNASWSClient.call()` is already
+  documented "not thread-hostile" (each call gets its own request id),
+  the exact property `fleet.py`'s cross-instance fan-out already relied
+  on since F3.
+- Applied to the four routes that had genuinely independent multi-call
+  reads: `shares` (5 calls → 1 round-trip), `apps_vms` (2 → 1),
+  `data_protection` (3 → 1), `telemetry` (cpu/memory/interface.query:
+  3 → 1, network stays a second stage since it needs the resolved
+  interface name first — 4 sequential round-trips down to 2).
+- **Not done, considered and rejected**: a server-side TTL cache on the
+  remaining read routes (system/pools/datasets/snapshots/etc.), mirroring
+  `fleet`'s existing 15s cache. Fleet is a read-only aggregate dashboard
+  where slight staleness is harmless; these routes are read right after
+  a write (create a dataset, delete a share) and a cache would risk
+  showing stale data exactly when the operator is verifying their own
+  change. The concurrency fix above addresses per-load latency without
+  that trade-off.
+- 3 new tests for `parallel_safe_calls` itself (concurrent timing,
+  result-order preservation regardless of completion order, per-spec
+  failure isolation) — 355 tests total.
+
 ## [0.9.0] - 2026-07-20 (F4c: real SMB/NFS share create/update/delete)
 
 Last item of the 4-item batch (charts, F4c, F5, F6 — all done). Schemas

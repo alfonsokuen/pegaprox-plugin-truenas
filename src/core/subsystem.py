@@ -18,11 +18,33 @@ lowest-common-denominator shape across subsystems.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .errors import TrueNASError
 
 log = logging.getLogger('plugin.truenas.subsystem')
+
+
+def parallel_safe_calls(specs):
+    """Run several ``safe_call``-shaped ``(label, fn, default)`` specs
+    CONCURRENTLY against the same connection, returning ``[(value, error),
+    ...]`` in the same order as ``specs``.
+
+    Safe because ``TrueNASWSClient.call()`` is documented as not
+    thread-hostile (each call gets its own request id and waits only for
+    its own response — see ``fleet.py``, the first place this pattern was
+    used, across DIFFERENT instances). Every multi-collection subsystem
+    (shares' 5 queries, apps_vms' 2, data_protection's 3, telemetry's 4)
+    used to pay N sequential WebSocket round-trips for reads that don't
+    depend on each other — this collapses that to the slowest single
+    call instead of the sum of all of them, without changing any
+    behavior: each spec still degrades independently exactly like a
+    sequential ``safe_call`` would.
+    """
+    with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+        futures = [pool.submit(safe_call, label, fn, default) for label, fn, default in specs]
+        return [f.result() for f in futures]
 
 
 def safe_call(label, fn, default):

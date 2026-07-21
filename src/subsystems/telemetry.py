@@ -31,7 +31,7 @@ server-side, once, rather than sending the raw resolution to every client
 on every poll.
 """
 
-from core.subsystem import safe_call
+from core.subsystem import parallel_safe_calls, safe_call
 
 MAX_POINTS = 120
 REPORTING_UNIT = 'HOUR'
@@ -91,12 +91,19 @@ def network_series(conn, iface_name):
 def telemetry(conn, physmem=None):
     """Every series fetched independently via ``safe_call`` — a hung/
     erroring network graph must not also hide CPU/memory, same isolation
-    rule as every other multi-call subsystem in this plugin."""
-    cpu, cpu_error = safe_call('reporting.get_data(cpu)', lambda: cpu_series(conn), [])
-    memory, memory_error = safe_call(
-        'reporting.get_data(memory)', lambda: memory_series(conn, physmem), [])
-    iface_name, iface_error = safe_call(
-        'interface.query', lambda: primary_interface_name(conn), None)
+    rule as every other multi-call subsystem in this plugin.
+
+    ``network`` needs ``iface_name`` first, so it can't join the first
+    round — but cpu/memory/interface.query have no such dependency on
+    each other and used to pay three sequential round-trips anyway.
+    Fetched CONCURRENTLY instead (perf finding 2026-07-21): two RPC
+    stages instead of four, since network is the only genuinely
+    sequential step."""
+    (cpu, cpu_error), (memory, memory_error), (iface_name, iface_error) = parallel_safe_calls([
+        ('reporting.get_data(cpu)', lambda: cpu_series(conn), []),
+        ('reporting.get_data(memory)', lambda: memory_series(conn, physmem), []),
+        ('interface.query', lambda: primary_interface_name(conn), None),
+    ])
     network, network_error = safe_call(
         'reporting.get_data(interface)', lambda: network_series(conn, iface_name), [])
     return {
