@@ -249,8 +249,17 @@
     <div id="replication-body" class="empty">Elegí una instancia arriba.</div>
   </section>
   <section class="tab" id="tab-apps">
-    <div class="subtab-hint">Solo lectura en F1 — start/stop llega en F3.</div>
     <div id="apps-body" class="empty">Elegí una instancia arriba.</div>
+    <div class="card" id="resource-write-card" hidden>
+      <h2 id="resource-write-title"></h2>
+      <div id="resource-write-preview" class="subtab-hint"></div>
+      <div class="toolbar" style="margin-top:10px">
+        <button class="btn secondary" id="btn-resource-preview">Vista previa</button>
+        <button class="btn" id="btn-resource-confirm">Confirmar y ejecutar</button>
+        <button class="btn secondary" id="btn-resource-cancel">Cancelar</button>
+      </div>
+      <div id="resource-write-result" class="subtab-hint"></div>
+    </div>
   </section>
   <section class="tab" id="tab-services">
     <div id="services-body" class="empty">Elegí una instancia arriba.</div>
@@ -980,6 +989,66 @@
     });
   }
 
+  var VM_OP_LABEL = { start: 'Iniciar', stop: 'Detener', restart: 'Reiniciar' };
+  // Apps have no 'restart' — only 'redeploy' (stop + pull latest images +
+  // start), a meaningfully heavier op than a plain restart (confirmed live:
+  // app.restart doesn't exist on TrueNAS-25.10.1). Never aliased to
+  // "Reiniciar" so the operator isn't misled about what it actually does.
+  var APP_OP_LABEL = { start: 'Iniciar', stop: 'Detener', redeploy: 'Redeploy' };
+
+  function renderAppsVms(body, data) {
+    body.className = '';
+    body.innerHTML =
+      '<h2 style="font-size:14px">Apps (Docker)</h2><div id="apps-list"></div>' +
+      '<h2 style="font-size:14px;margin-top:16px">VMs</h2><div id="vms-list"></div>';
+
+    var appsList = document.getElementById('apps-list');
+    if (!data.apps || !data.apps.length) {
+      appsList.className = 'empty'; appsList.innerHTML = 'Sin apps.';
+    } else {
+      var appsHtml = '<table><thead><tr><th>Nombre</th><th>Estado</th><th></th></tr></thead><tbody>';
+      data.apps.forEach(function (a) {
+        var running = String(a.state || '').toUpperCase() === 'RUNNING';
+        appsHtml += '<tr><td>' + esc(a.name || a.id) + '</td><td>' + badge(a.state || '?') + '</td>' +
+          '<td class="row-actions" data-kind="apps" data-id="' + esc(a.name) + '" data-running="' + running + '"></td></tr>';
+      });
+      appsHtml += '</tbody></table>';
+      appsList.innerHTML = appsHtml;
+    }
+
+    var vmsList = document.getElementById('vms-list');
+    if (!data.vms || !data.vms.length) {
+      vmsList.className = 'empty'; vmsList.innerHTML = 'Sin VMs.';
+    } else {
+      var vmsHtml = '<table><thead><tr><th>Nombre</th><th>Estado</th><th></th></tr></thead><tbody>';
+      data.vms.forEach(function (v) {
+        var state = v.status && v.status.state;
+        var running = String(state || '').toUpperCase() === 'RUNNING';
+        vmsHtml += '<tr><td>' + esc(v.name || v.id) + '</td><td>' + badge(state || '?') + '</td>' +
+          '<td class="row-actions" data-kind="vms" data-id="' + esc(v.id) + '" data-running="' + running + '"></td></tr>';
+      });
+      vmsHtml += '</tbody></table>';
+      vmsList.innerHTML = vmsHtml;
+    }
+
+    body.querySelectorAll('td.row-actions').forEach(function (cell) {
+      var kind = cell.dataset.kind;
+      var id = cell.dataset.id;
+      var running = cell.dataset.running === 'true';
+      var ops = kind === 'vms'
+        ? (running ? ['stop', 'restart'] : ['start'])
+        : (running ? ['stop', 'redeploy'] : ['start']);
+      var labels = kind === 'vms' ? VM_OP_LABEL : APP_OP_LABEL;
+      ops.forEach(function (op) {
+        var btn = document.createElement('button');
+        btn.className = 'btn secondary';
+        btn.textContent = labels[op];
+        btn.addEventListener('click', function () { openResourceForm(kind, op, id, labels[op]); });
+        cell.appendChild(btn);
+      });
+    });
+  }
+
   function renderSimpleTable(body, items, columns) {
     body.className = '';
     if (!items || !items.length) { body.className = 'empty'; body.innerHTML = 'Sin datos.'; return; }
@@ -1098,20 +1167,7 @@
         ['Última corrida', function (r) { return (r.job && r.job.time && r.job.time.finished) || ''; }],
       ]);
     },
-    apps: function (body, data) {
-      body.className = '';
-      body.innerHTML =
-        '<h2 style="font-size:14px">Apps (Docker)</h2><div id="apps-list"></div>' +
-        '<h2 style="font-size:14px;margin-top:16px">VMs</h2><div id="vms-list"></div>';
-      renderSimpleTable(document.getElementById('apps-list'), data.apps, [
-        ['Nombre', function (a) { return a.name || a.id; }],
-        ['Estado', function (a) { return a.state || ''; }],
-      ]);
-      renderSimpleTable(document.getElementById('vms-list'), data.vms, [
-        ['Nombre', function (v) { return v.name || v.id; }],
-        ['Estado', function (v) { return v.status && v.status.state || ''; }],
-      ]);
-    },
+    apps: renderAppsVms,
     services: renderServices,
   };
 
@@ -1338,6 +1394,69 @@
         if (res.data.status === 'ok') {
           closeSnapshotForm();
           invalidateAndRefetch('snapshots');
+        }
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+        .finally(function () { btn.disabled = false; });
+  });
+
+  // -- VM/App control form (F5: start/stop/restart/redeploy) --------------
+  // Same dry-run-then-confirm rationale as services' F4b — stopping/
+  // redeploying a real workload should never fire on a single click.
+
+  var resourceWrite = { subsystem: null, op: null, id: null };
+
+  function openResourceForm(subsystem, op, id, opLabel) {
+    resourceWrite = { subsystem: subsystem, op: op, id: id };
+    document.getElementById('resource-write-card').hidden = false;
+    document.getElementById('resource-write-title').textContent = opLabel + ': ' + id;
+    document.getElementById('resource-write-preview').textContent = '';
+    document.getElementById('resource-write-result').textContent = '';
+  }
+
+  function closeResourceForm() {
+    document.getElementById('resource-write-card').hidden = true;
+    resourceWrite = { subsystem: null, op: null, id: null };
+  }
+
+  function resourcePayload() {
+    return resourceWrite.subsystem === 'vms'
+      ? { vm_id: resourceWrite.id }
+      : { app_name: resourceWrite.id };
+  }
+
+  document.getElementById('btn-resource-cancel').addEventListener('click', closeResourceForm);
+  document.getElementById('btn-resource-preview').addEventListener('click', function () {
+    var btn = this;
+    var out = document.getElementById('resource-write-preview');
+    btn.disabled = true;
+    out.textContent = 'Consultando…';
+    writesDryRun(resourceWrite.subsystem, resourceWrite.op, resourcePayload()).then(function (res) {
+      if (res.status !== 200) {
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+        return;
+      }
+      out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+      .finally(function () { btn.disabled = false; });
+  });
+  document.getElementById('btn-resource-confirm').addEventListener('click', function () {
+    // Same double-submit guard as every other write confirm — see dataset
+    // form's comment.
+    var btn = this;
+    var out = document.getElementById('resource-write-result');
+    btn.disabled = true;
+    out.textContent = 'Ejecutando…';
+    writesExecute(state.selectedInstance, resourceWrite.subsystem, resourceWrite.op, resourcePayload())
+      .then(function (res) {
+        if (res.status >= 400) {
+          out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+          return;
+        }
+        out.textContent = 'Resultado: ' + res.data.status +
+          (res.data.job_id ? ' (job_id=' + res.data.job_id + ')' : '');
+        if (res.data.status === 'ok') {
+          closeResourceForm();
+          invalidateAndRefetch('apps');
         }
       }).catch(function (e) { out.textContent = networkErrorMessage(e); })
         .finally(function () { btn.disabled = false; });

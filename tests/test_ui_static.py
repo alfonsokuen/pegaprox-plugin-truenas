@@ -147,3 +147,24 @@ def test_services_tab_only_offers_valid_actions_per_current_state():
     service is already in that state."""
     html = _read_ui()
     assert "var ops = running ? ['stop', 'restart'] : ['start'];" in html
+
+
+def test_apps_vms_tab_has_lifecycle_action_buttons_wired():
+    """F5 (2026-07-20): the Apps/VMs tab must offer start/stop/restart
+    (VMs) and start/stop/redeploy (apps) via the same writesDryRun/
+    writesExecute flow as services/datasets — not a bare read-only table."""
+    html = _read_ui()
+    assert 'function renderAppsVms(body, data)' in html
+    assert 'function openResourceForm(subsystem, op, id, opLabel)' in html
+    assert "writesDryRun(resourceWrite.subsystem, resourceWrite.op" in html
+    assert "writesExecute(state.selectedInstance, resourceWrite.subsystem, resourceWrite.op" in html
+
+
+def test_apps_never_offer_a_restart_op_only_redeploy():
+    """Apps have no 'restart' method on TrueNAS-25.10.1 (only 'redeploy',
+    which also pulls new images) — the UI must never offer a 'restart' op
+    for apps, only for VMs."""
+    html = _read_ui()
+    assert "var APP_OP_LABEL = { start: 'Iniciar', stop: 'Detener', redeploy: 'Redeploy' };" in html
+    assert "(running ? ['stop', 'redeploy'] : ['start'])" in html
+    assert "(running ? ['stop', 'restart'] : ['start'])" in html

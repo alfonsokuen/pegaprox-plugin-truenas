@@ -48,6 +48,7 @@ from pegaprox.utils.audit import log_audit
 from core.conn_manager import ConnectionManager
 from core.errors import TrueNASAuthError, TrueNASError
 from core.subsystem import ConfirmationRequired, safe_call
+import subsystems.apps_vms as apps_vms_mod
 import subsystems.datasets as datasets_mod
 import subsystems.fleet as fleet_mod
 import subsystems.services as services_mod
@@ -635,6 +636,90 @@ def _verify_service_stopped(conn, payload, result):
     return _verify_service_state(conn, payload, 'STOPPED')
 
 
+# F5 — VM start/stop/restart and App start/stop/redeploy. Same build/
+# execute/verify split; VMs are keyed by integer id, apps by string name
+# (matches vm.start's `id: integer` vs app.start's `app_name: string`
+# schemas, confirmed live).
+
+def _vm_start_build(payload):
+    return apps_vms_mod.build_vm_control_envelope('start', payload.get('vm_id'))
+
+
+def _vm_start_execute(conn, payload):
+    return apps_vms_mod.control_vm(conn, 'start', payload.get('vm_id'))
+
+
+def _vm_stop_build(payload):
+    return apps_vms_mod.build_vm_control_envelope('stop', payload.get('vm_id'))
+
+
+def _vm_stop_execute(conn, payload):
+    return apps_vms_mod.control_vm(conn, 'stop', payload.get('vm_id'))
+
+
+def _vm_restart_build(payload):
+    return apps_vms_mod.build_vm_control_envelope('restart', payload.get('vm_id'))
+
+
+def _vm_restart_execute(conn, payload):
+    return apps_vms_mod.control_vm(conn, 'restart', payload.get('vm_id'))
+
+
+def _verify_vm_state(conn, payload, expected_states):
+    found = apps_vms_mod.find_vm(conn, payload.get('vm_id'))
+    if found is None:
+        return False, None
+    state = str((found.get('status') or {}).get('state', '')).upper()
+    return state in expected_states, found
+
+
+def _verify_vm_running(conn, payload, result):
+    return _verify_vm_state(conn, payload, {'RUNNING'})
+
+
+def _verify_vm_stopped(conn, payload, result):
+    return _verify_vm_state(conn, payload, {'STOPPED'})
+
+
+def _app_start_build(payload):
+    return apps_vms_mod.build_app_control_envelope('start', payload.get('app_name'))
+
+
+def _app_start_execute(conn, payload):
+    return apps_vms_mod.control_app(conn, 'start', payload.get('app_name'))
+
+
+def _app_stop_build(payload):
+    return apps_vms_mod.build_app_control_envelope('stop', payload.get('app_name'))
+
+
+def _app_stop_execute(conn, payload):
+    return apps_vms_mod.control_app(conn, 'stop', payload.get('app_name'))
+
+
+def _app_redeploy_build(payload):
+    return apps_vms_mod.build_app_control_envelope('redeploy', payload.get('app_name'))
+
+
+def _app_redeploy_execute(conn, payload):
+    return apps_vms_mod.control_app(conn, 'redeploy', payload.get('app_name'))
+
+
+def _verify_app_state(conn, payload, expected_states):
+    found = apps_vms_mod.find_app(conn, payload.get('app_name'))
+    if found is None:
+        return False, None
+    return str(found.get('state', '')).upper() in expected_states, found
+
+
+def _verify_app_running(conn, payload, result):
+    return _verify_app_state(conn, payload, {'RUNNING'})
+
+
+def _verify_app_stopped(conn, payload, result):
+    return _verify_app_state(conn, payload, {'STOPPED'})
+
+
 WRITE_OPS = {
     ('datasets', 'create'): {
         'build': _dataset_create_build, 'execute': _dataset_create_execute,
@@ -667,6 +752,30 @@ WRITE_OPS = {
     ('services', 'restart'): {
         'build': _service_restart_build, 'execute': _service_restart_execute,
         'verify': _verify_service_running,
+    },
+    ('vms', 'start'): {
+        'build': _vm_start_build, 'execute': _vm_start_execute,
+        'verify': _verify_vm_running,
+    },
+    ('vms', 'stop'): {
+        'build': _vm_stop_build, 'execute': _vm_stop_execute,
+        'verify': _verify_vm_stopped,
+    },
+    ('vms', 'restart'): {
+        'build': _vm_restart_build, 'execute': _vm_restart_execute,
+        'verify': _verify_vm_running,
+    },
+    ('apps', 'start'): {
+        'build': _app_start_build, 'execute': _app_start_execute,
+        'verify': _verify_app_running,
+    },
+    ('apps', 'stop'): {
+        'build': _app_stop_build, 'execute': _app_stop_execute,
+        'verify': _verify_app_stopped,
+    },
+    ('apps', 'redeploy'): {
+        'build': _app_redeploy_build, 'execute': _app_redeploy_execute,
+        'verify': _verify_app_running,
     },
 }
 

@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.6.0] - 2026-07-20 (F5: VM start/stop/restart + App start/stop/redeploy)
+
+Part of a 4-item batch the operator approved before publishing the plugin
+publicly (charts, F4c shares CRUD, F5, F6 — this entry is F5; the others
+land in their own version bumps).
+
+- Verified live (admin session) the real method surface before writing any
+  code: `vm.start(id:int, {overcommit})` (sync), `vm.stop(id, {force,
+  force_after_timeout})` (job), `vm.restart(id)` (job), `app.start(
+  app_name:str)` (job), `app.stop(app_name)` (job), `app.redeploy(
+  app_name)` (job). **`app.restart` does not exist** on this TrueNAS
+  version — only `redeploy` (stop + pull latest images + start), a
+  meaningfully heavier operation. Never aliased to "Reiniciar" in the UI;
+  labeled "Redeploy" so the operator isn't misled about what it does.
+- Granted `VM_WRITE` + `APPS_WRITE` to the same "PegaProx RW" privilege
+  object touched for F4b's `SERVICE_WRITE` — same additive, single-field
+  `privilege.update`, nothing else changed. Re-verified live with the RW
+  API key that `vm.start/stop/restart` and `app.start/stop/redeploy` are
+  now visible under `core.get_methods`.
+- **Caveat, stated plainly**: unlike F4b's services (toggled the harmless,
+  already-disabled `ftp` service end-to-end), neither `vm.query` nor
+  `app.query` had any live row on `.64` at verification time (both `[]` —
+  no VM/app configured there yet). The write path reuses the identical,
+  already-tested build/execute/verify/audit machinery every other write
+  uses; what's NOT independently confirmed is a real VM/app actually
+  reaching the expected post-write state on `.64` specifically — re-check
+  once one exists there.
+- `subsystems/apps_vms.py`: `build_vm_control_envelope`/`control_vm` (VMs
+  keyed by integer `id`) and `build_app_control_envelope`/`control_app`
+  (apps keyed by string `name`) — same pure-builder/real-caller split as
+  every other F2+ write. 6 new `WRITE_OPS` entries reuse the existing
+  generic `writes/dry-run`/`writes/execute` routes.
+- Apps/VMs tab: per-row Iniciar/Detener/Reiniciar (VMs) and Iniciar/
+  Detener/Redeploy (apps) buttons, only the ops valid for the row's
+  current state, through the same dry-run-preview-then-confirm flow as
+  services/datasets/snapshots.
+- 307 tests (up from 286).
+
 ## [0.5.0] - 2026-07-20 (F4b: real start/stop/restart of services)
 
 `0.4.0`'s F4a shipped read-only service status because the RW key's

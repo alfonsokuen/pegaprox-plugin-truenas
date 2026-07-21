@@ -1210,3 +1210,64 @@ def test_writes_execute_service_start_403_when_instance_is_readonly(
     })
     resp, status = routes_api.writes_execute_handler()
     assert status == 403
+
+
+# ---------------------------------------------------------------------------
+# F5: VM start/stop/restart, App start/stop/redeploy.
+# ---------------------------------------------------------------------------
+
+def test_writes_dry_run_vm_start_returns_method_and_params(
+        plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'vms', 'op': 'start', 'payload': {'vm_id': 3},
+    })
+    resp = routes_api.writes_dry_run_handler()
+    _, payload = resp
+    assert payload['method'] == 'vm.start'
+    assert payload['params'] == [3, {'overcommit': False}]
+
+
+def test_writes_execute_vm_start_verifies_running_state(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({
+        'vm.start': True,
+        'vm.query': [{'id': 3, 'status': {'state': 'RUNNING'}}],
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'vms', 'op': 'start',
+        'payload': {'vm_id': 3},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['ok'] is True
+
+
+def test_writes_dry_run_app_redeploy_returns_method_and_params(
+        plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'apps', 'op': 'redeploy', 'payload': {'app_name': 'plex'},
+    })
+    resp = routes_api.writes_dry_run_handler()
+    _, payload = resp
+    assert payload['method'] == 'app.redeploy'
+    assert payload['params'] == ['plex']
+
+
+def test_writes_execute_app_stop_reports_verify_failed_if_still_running(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({
+        'app.stop': 111,
+        'app.query': [{'name': 'plex', 'state': 'RUNNING'}],
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'apps', 'op': 'stop',
+        'payload': {'app_name': 'plex'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['ok'] is False
+    assert payload['status'] == 'pending'  # app.stop returned an int job id
