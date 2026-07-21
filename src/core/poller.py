@@ -142,10 +142,16 @@ def run_one_cycle(config_path, state_path, get_conn):
         alerts.save_state(state_path, new_state)
 
         if notifications:
-            webhook_url = (cfg.get('notify') or {}).get('webhook_url')
-            ok, err = notify.send_webhook(webhook_url, notifications)
+            notify_cfg = cfg.get('notify') or {}
+            ok, err = notify.send_webhook(notify_cfg.get('webhook_url'), notifications)
             if not ok:
                 log.warning(f'[truenas] poller: webhook delivery failed: {err}')
+            ok, err = notify.send_whatsapp(
+                notify_cfg.get('whatsapp_gateway_url'), notify_cfg.get('whatsapp_instance'),
+                notify_cfg.get('whatsapp_api_key'), notify_cfg.get('whatsapp_target'),
+                notifications)
+            if not ok:
+                log.warning(f'[truenas] poller: whatsapp delivery failed: {err}')
 
         _set_status(ok=True, error=None, notifications_sent=len(notifications))
         return cadence

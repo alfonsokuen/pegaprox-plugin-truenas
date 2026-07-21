@@ -57,3 +57,40 @@ def test_send_webhook_connection_error_never_raises(monkeypatch):
     ok, err = notify.send_webhook('http://example.invalid/hook', [{'message': 'x'}])
     assert ok is False
     assert 'connection refused' in err
+
+
+def test_send_whatsapp_skips_cleanly_when_not_fully_configured():
+    ok, err = notify.send_whatsapp('https://evolution.example', None, 'key', 'target', [])
+    assert ok is False
+    assert 'not fully configured' in err
+
+
+def test_send_whatsapp_posts_to_the_evolution_sendtext_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured['url'] = req.full_url
+        captured['apikey'] = req.get_header('Apikey')
+        captured['body'] = req.data
+        return _FakeResponse(200)
+
+    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    ok, err = notify.send_whatsapp(
+        'https://evolution01.idkmanager.com', 'cum', 'the-key', '593999999999',
+        [{'message': 'pool tank at 91%'}])
+    assert ok is True
+    assert err is None
+    assert captured['url'] == 'https://evolution01.idkmanager.com/message/sendText/cum'
+    assert captured['apikey'] == 'the-key'
+    assert b'593999999999' in captured['body']
+    assert b'pool tank at 91' in captured['body']
+
+
+def test_send_whatsapp_http_error_never_raises(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 401, 'bad key', {}, None)
+
+    monkeypatch.setattr('urllib.request.urlopen', fake_urlopen)
+    ok, err = notify.send_whatsapp('https://evolution.example', 'cum', 'bad', 'target', [{'message': 'x'}])
+    assert ok is False
+    assert '401' in err

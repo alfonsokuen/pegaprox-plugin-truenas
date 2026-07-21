@@ -27,7 +27,19 @@ log = logging.getLogger('plugin.truenas.config_store')
 
 DEFAULT_POLL = {'fast_s': 10, 'slow_s': 60, 'cold_s': 900}
 DEFAULT_THRESHOLDS = {'warn_pct': 80, 'crit_pct': 90}
-DEFAULT_NOTIFY = {'webhook_url': None}
+DEFAULT_NOTIFY = {
+    'webhook_url': None,
+    # F4b: WhatsApp channel via the existing Evolution API gateway (already
+    # used across the org — see idkmanager-infra skill), NOT a new client.
+    # gateway_url defaults to the known org-wide instance; only the target
+    # number/JID, which Evolution instance to send FROM, and its api key
+    # are per-deployment.
+    'whatsapp_gateway_url': 'https://evolution01.idkmanager.com',
+    'whatsapp_instance': None,
+    'whatsapp_target': None,
+    'whatsapp_api_key': None,
+}
+_NOTIFY_SECRET_FIELDS = ('webhook_url', 'whatsapp_api_key')
 MASK = '***'
 _KEY_FIELDS = ('api_key_ro', 'api_key_rw')
 
@@ -370,30 +382,35 @@ def validate_poll(raw_poll):
 
 
 def mask_notify(notify):
-    """Same masking convention as api_key_ro/rw — a webhook URL commonly
-    embeds a bearer token in its path/query (Slack/Discord/Teams webhooks
-    all work this way), so it's treated as a secret too: masked on GET,
-    round-tripped on save when the masked sentinel comes back unchanged."""
+    """Same masking convention as api_key_ro/rw for every secret-shaped
+    field — a webhook URL commonly embeds a bearer token, and
+    whatsapp_api_key IS a real API key — masked on GET, round-tripped on
+    save when the masked sentinel comes back unchanged."""
     safe = dict(notify)
-    if safe.get('webhook_url'):
-        safe['webhook_url'] = MASK
+    for field in _NOTIFY_SECRET_FIELDS:
+        if safe.get(field):
+            safe[field] = MASK
     return safe
 
 
 def validate_notify(raw, old_notify=None):
-    """Validate the F4a notification-channel config. A ``webhook_url`` of
-    ``None``/``""`` means "no webhook configured" — the poller simply skips
-    delivery, this is not an error (matches api_key_ro/rw's own "falsy is a
-    legitimate unset state" convention). A non-empty value must at least
-    look like an http(s) URL — a typo here would otherwise fail silently
-    forever inside the poller thread instead of at save time, where the
-    operator can see it immediately."""
+    """Validate the F4a/F4b notification-channel config. Every field
+    falsy/unset means "that channel isn't configured" — the poller just
+    skips it, never an error (matches api_key_ro/rw's own convention). A
+    non-empty ``webhook_url`` must at least look like an http(s) URL — a
+    typo here would otherwise fail silently forever inside the poller
+    thread instead of at save time, where the operator can see it
+    immediately. WhatsApp fields (gateway_url/instance/target/api_key) are
+    stored as plain strings — no format validation (an Evolution instance
+    name and a target JID/number don't have a single reliable shape to
+    check)."""
     old_notify = old_notify or DEFAULT_NOTIFY
     notify = dict(DEFAULT_NOTIFY)
     if raw is None:
         return notify, None
     if not isinstance(raw, dict):
         return None, 'notify must be an object'
+
     url = raw.get('webhook_url')
     if url == MASK:
         if not old_notify.get('webhook_url'):
@@ -404,4 +421,18 @@ def validate_notify(raw, old_notify=None):
         if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
             return None, 'notify.webhook_url must start with http:// or https://'
         notify['webhook_url'] = url
+
+    gw = raw.get('whatsapp_gateway_url')
+    notify['whatsapp_gateway_url'] = gw if gw else DEFAULT_NOTIFY['whatsapp_gateway_url']
+    notify['whatsapp_instance'] = raw.get('whatsapp_instance') or None
+    notify['whatsapp_target'] = raw.get('whatsapp_target') or None
+
+    api_key = raw.get('whatsapp_api_key')
+    if api_key == MASK:
+        if not old_notify.get('whatsapp_api_key'):
+            return None, ('notify.whatsapp_api_key: se recibió enmascarado pero no hay un '
+                          'valor previo guardado (volvé a pegar la key)')
+        notify['whatsapp_api_key'] = old_notify['whatsapp_api_key']
+    else:
+        notify['whatsapp_api_key'] = api_key or None
     return notify, None

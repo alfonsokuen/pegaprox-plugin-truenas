@@ -421,6 +421,12 @@
           <button class="btn secondary" id="btn-save-notify">Guardar notificaciones</button>
         </div>
       </div>
+      <div class="subtab-hint" style="margin:10px 0 4px">WhatsApp (gateway Evolution ya existente en la org):</div>
+      <div class="field-row tri">
+        <div class="field"><label>Instancia Evolution</label><input type="text" id="f-wa-instance" placeholder="p.ej. cum"></div>
+        <div class="field"><label>Número/JID destino</label><input type="text" id="f-wa-target" placeholder="593XXXXXXXXX"></div>
+        <div class="field"><label>API key</label><input type="text" id="f-wa-key" placeholder="***"></div>
+      </div>
       <div id="notify-result"></div>
       <div class="subtab-hint" id="poller-status-badge" style="margin-top:10px"></div>
     </div>
@@ -777,6 +783,9 @@
       document.getElementById('f-thresh-crit').value = thresholds.crit_pct;
       var notifyCfg = res.data.notify || {};
       document.getElementById('f-webhook-url').value = notifyCfg.webhook_url || '';
+      document.getElementById('f-wa-instance').value = notifyCfg.whatsapp_instance || '';
+      document.getElementById('f-wa-target').value = notifyCfg.whatsapp_target || '';
+      document.getElementById('f-wa-key').value = notifyCfg.whatsapp_api_key || '';
       refreshPollerStatusBadge();
 
       // Building <option> elements never fires 'change' — the browser
@@ -875,7 +884,12 @@
         instances: (state.config && state.config.instances) || [],
         poll: state.config ? state.config.poll : undefined,
         thresholds: state.config ? state.config.thresholds : undefined,
-        notify: { webhook_url: url || null },
+        notify: {
+          webhook_url: url || null,
+          whatsapp_instance: document.getElementById('f-wa-instance').value.trim() || null,
+          whatsapp_target: document.getElementById('f-wa-target').value.trim() || null,
+          whatsapp_api_key: document.getElementById('f-wa-key').value.trim() || null,
+        },
       },
     }).then(function (res) {
       btn.disabled = false;

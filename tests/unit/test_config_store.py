@@ -436,6 +436,30 @@ def test_validate_notify_masked_url_without_prior_value_errors():
     assert 'enmascarad' in err
 
 
+def test_validate_notify_whatsapp_fields_round_trip():
+    notify, err = config_store.validate_notify({
+        'whatsapp_instance': 'cum', 'whatsapp_target': '593999999999',
+        'whatsapp_api_key': 'real-key',
+    })
+    assert err is None
+    assert notify['whatsapp_instance'] == 'cum'
+    assert notify['whatsapp_target'] == '593999999999'
+    assert notify['whatsapp_api_key'] == 'real-key'
+    assert notify['whatsapp_gateway_url'] == config_store.DEFAULT_NOTIFY['whatsapp_gateway_url']
+
+
+def test_validate_notify_whatsapp_api_key_masked_round_trips():
+    old = {'whatsapp_api_key': 'real-key'}
+    notify, err = config_store.validate_notify({'whatsapp_api_key': config_store.MASK}, old)
+    assert err is None
+    assert notify['whatsapp_api_key'] == 'real-key'
+
+
+def test_mask_notify_masks_whatsapp_api_key():
+    masked = config_store.mask_notify({'whatsapp_api_key': 'real-key', 'webhook_url': None})
+    assert masked['whatsapp_api_key'] == config_store.MASK
+
+
 def test_save_config_logs_warning_when_chmod_fails(tmp_path, monkeypatch, caplog):
     """config.json holds API keys in clear text — a failed chmod 600 used
     to be swallowed with a bare `except OSError: pass`, hiding a real

@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.15.0] - 2026-07-21 (notifications: WhatsApp channel via the org's existing Evolution gateway)
+
+Last item of the config-audit backlog. The earlier assumption (from the
+poller incident's arquitecto review) that CT119 has no route to
+`evolution01.idkmanager.com` was WRONG — confirmed live: a real HTTP 200
+plus an authenticated `/instance/fetchInstances` call succeeded directly,
+no LAN-only routing gap. No new WhatsApp client built: reuses the exact
+`POST /message/sendText/<instance>` shape the org's own `wta-send.sh`
+helper already uses against the same gateway.
+
+- `core/notify.py`: `send_whatsapp(gateway_url, instance, api_key,
+  target, notifications)` — same never-raises `(ok, error)` contract as
+  `send_webhook`.
+- `config_store.py`: `notify.whatsapp_{gateway_url,instance,target,
+  api_key}` — `whatsapp_api_key` joins the masked-secret convention
+  (mask on GET, round-trip on save).
+- `poller.py`: dispatches to both webhook and WhatsApp (independently —
+  a WhatsApp delivery failure doesn't block the webhook, and vice versa)
+  when notifications fire.
+- Settings UI: instance/target/api-key fields (gateway URL defaults to
+  the known org-wide instance, not user-facing).
+- 454 tests green (6 new).
+
 ## [0.14.0] - 2026-07-21 (background poller + edge-triggered notifications)
 
 **Update, same day — root cause confirmed, poller RE-ENABLED.** The drop
