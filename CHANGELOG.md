@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.11.1] - 2026-07-21 (telemetry: one Red card per interface, not just the first)
+
+Operator noticed on the freshly-deployed 0.11.0 charts: "por que solo veo
+la Red (eno1) y el resto de interfaces?" — `telemetry.py`'s
+`primary_interface_name()` had only ever resolved `interface.query()[0]`,
+a documented "out of scope for a first pass" limitation from when the
+telemetry graphs were first built, silently hiding every NIC after the
+first on a multi-NIC/bonded host.
+
+- `all_interface_names(conn)` replaces `primary_interface_name(conn)` —
+  returns every configured interface, not just the first.
+- `telemetry()` now fetches every interface's series CONCURRENTLY (same
+  `parallel_safe_calls` pattern as cpu/memory), with the same per-item
+  failure isolation as everywhere else in this plugin: one interface's
+  `reporting.get_data` failing must not blank the others. Returns
+  `interfaces: [{name, series, error}, ...]` instead of the old singular
+  `network`/`network_error`/`network_interface` fields.
+- Frontend: `renderTelemetryCards` renders one "Red (<name>)" card per
+  interface instead of a single hardcoded one; a real per-interface error
+  shows inline on just that card, and "no interfaces configured" gets its
+  own honest empty state rather than silently rendering nothing.
+- The dynamic-length interface loop uses `n=name` default-argument binding
+  for each fetch closure — a bare `lambda: network_series(conn, name)`
+  inside the loop would've closed over the shared loop variable, so every
+  interface's thunk would fetch whichever name was left by the time
+  `parallel_safe_calls` actually ran them. Covered by a dedicated test
+  (`test_telemetry_returns_a_card_per_interface_not_just_the_first`)
+  asserting each interface gets back ITS OWN distinct series, not a
+  shared/duplicated one.
+- Verified: 370 tests green (4 new). Visually verified against a 3-interface
+  mock (two working at different scales, one erroring) — each renders
+  independently and correctly before deploying.
+
 ## [0.11.0] - 2026-07-21 (charts: ring gauges, bar-list rankings, interactive sparklines)
 
 Operator request: "mejora las vistas, gráficos más bonitos e interactivos"

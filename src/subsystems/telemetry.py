@@ -20,9 +20,11 @@ Real shapes confirmed live before writing any code:
 - ``interface``'s legend is ``['time', 'received', 'sent']`` but requires
   a real interface ``identifier`` (confirmed live: passing ``None``/``'*'``
   silently returns zero rows, not an error) — resolved via
-  ``interface.query``'s first configured interface. Multi-NIC/bonded setups
-  aren't disambiguated here (out of scope for a first pass); the resolved
-  name is returned alongside the series so the UI can label it honestly.
+  ``interface.query``. Every configured interface gets its own series
+  (operator request 2026-07-21: the first pass only ever showed the first
+  NIC, silently hiding the rest on multi-NIC/bonded hosts) — each fetched
+  independently so one interface's `reporting.get_data` failing doesn't
+  blank the others, same isolation rule as cpu/memory/network as a whole.
 
 A 1-hour window returns ~3600 one-second rows per metric — far more points
 than a small Overview sparkline needs or should ship over the wire.
@@ -73,9 +75,9 @@ def memory_series(conn, physmem):
     return _downsample(rows)
 
 
-def primary_interface_name(conn):
+def all_interface_names(conn):
     ifaces = conn.call('interface.query') or []
-    return ifaces[0].get('name') if ifaces else None
+    return [i['name'] for i in ifaces if i.get('name')]
 
 
 def network_series(conn, iface_name):
@@ -89,26 +91,38 @@ def network_series(conn, iface_name):
 
 
 def telemetry(conn, physmem=None):
-    """Every series fetched independently via ``safe_call`` — a hung/
-    erroring network graph must not also hide CPU/memory, same isolation
-    rule as every other multi-call subsystem in this plugin.
+    """Every series fetched independently via ``safe_call``/
+    ``parallel_safe_calls`` — a hung/erroring graph must not also hide the
+    others, same isolation rule as every other multi-call subsystem in
+    this plugin (now also applied PER INTERFACE, not just per-metric: one
+    NIC's `reporting.get_data` failing must not blank the rest).
 
-    ``network`` needs ``iface_name`` first, so it can't join the first
-    round — but cpu/memory/interface.query have no such dependency on
-    each other and used to pay three sequential round-trips anyway.
-    Fetched CONCURRENTLY instead (perf finding 2026-07-21): two RPC
-    stages instead of four, since network is the only genuinely
-    sequential step."""
-    (cpu, cpu_error), (memory, memory_error), (iface_name, iface_error) = parallel_safe_calls([
+    Interface series need ``iface_names`` first, so they can't join the
+    first round — but cpu/memory/interface.query have no such dependency
+    on each other and used to pay three sequential round-trips anyway.
+    Fetched CONCURRENTLY instead (perf finding 2026-07-21)."""
+    (cpu, cpu_error), (memory, memory_error), (iface_names, iface_names_error) = parallel_safe_calls([
         ('reporting.get_data(cpu)', lambda: cpu_series(conn), []),
         ('reporting.get_data(memory)', lambda: memory_series(conn, physmem), []),
-        ('interface.query', lambda: primary_interface_name(conn), None),
+        ('interface.query', lambda: all_interface_names(conn), []),
     ])
-    network, network_error = safe_call(
-        'reporting.get_data(interface)', lambda: network_series(conn, iface_name), [])
+
+    interfaces = []
+    if iface_names:
+        # `n=name` binds each loop value at lambda-creation time — a bare
+        # `lambda: network_series(conn, name)` would close over the loop
+        # variable itself, so every thunk would fetch whichever interface
+        # happened to be last by the time parallel_safe_calls runs them.
+        specs = [
+            ('reporting.get_data(interface:%s)' % name, (lambda n=name: network_series(conn, n)), [])
+            for name in iface_names
+        ]
+        for name, (series, error) in zip(iface_names, parallel_safe_calls(specs)):
+            interfaces.append({'name': name, 'series': series, 'error': error})
+
     return {
         'cpu': cpu, 'cpu_error': cpu_error,
         'memory': memory, 'memory_error': memory_error,
-        'network': network, 'network_error': network_error or iface_error,
-        'network_interface': iface_name,
+        'interfaces': interfaces,
+        'interfaces_error': iface_names_error,
     }

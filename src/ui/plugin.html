@@ -1221,12 +1221,26 @@
         ? '<div class="subtab-hint">' + esc(telemetry.memory_error) + '</div>'
         : renderSparkline(telemetry.memory, { min: 0, max: 100, color: 'var(--ok)', format: function (v) { return v.toFixed(1) + '%'; } })) +
       '</div>';
-    html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'Red' +
-      (telemetry.network_interface ? ' (' + esc(telemetry.network_interface) + ')' : '') + '</div>' +
-      (telemetry.network_error
-        ? '<div class="subtab-hint">' + esc(telemetry.network_error) + '</div>'
-        : renderDualSparkline(telemetry.network, { format: function (v) { return formatBytes(v) + '/s'; } })) +
-      '</div>';
+    // One card per configured interface (operator request 2026-07-21: a
+    // multi-NIC host only ever showed the first one — interfaces_error
+    // covers "couldn't even list them"; an empty (but errorless) list
+    // covers "listed fine, there just aren't any").
+    if (telemetry.interfaces_error) {
+      html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'Red</div>' +
+        '<div class="subtab-hint">' + esc(telemetry.interfaces_error) + '</div></div>';
+    } else if (!telemetry.interfaces || !telemetry.interfaces.length) {
+      html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'Red</div>' +
+        '<div class="subtab-hint">Sin interfaces configuradas.</div></div>';
+    } else {
+      telemetry.interfaces.forEach(function (iface) {
+        html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system +
+          'Red (' + esc(iface.name) + ')</div>' +
+          (iface.error
+            ? '<div class="subtab-hint">' + esc(iface.error) + '</div>'
+            : renderDualSparkline(iface.series, { format: function (v) { return formatBytes(v) + '/s'; } })) +
+          '</div>';
+      });
+    }
     html += '</div>';
     return html;
   }
