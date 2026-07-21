@@ -44,3 +44,18 @@ def test_parse_json_field_never_silently_falls_back_to_empty_object():
     html = _read_ui()
     assert 'function parseJsonField(raw, fallback)' not in html
     assert "{ ok: false, error: e.message }" in html
+
+
+def test_load_config_syncs_selected_instance_after_auto_select():
+    """Live bug (2026-07-20, real .64 in production): building <option>
+    elements in renderSelector() never fires 'change' — the browser
+    auto-picks the first instance once any exist, but state.selectedInstance
+    (only ever set by the 'change' listener) stayed '', so every tab showed
+    "Elegí una instancia arriba" even with an instance visibly selected in
+    the dropdown. loadConfig() must sync state.selectedInstance from the
+    select element's actual value right after rendering it."""
+    html = _read_ui()
+    load_config = html.split('function loadConfig()')[1].split('function saveInstances')[0]
+    assert "document.getElementById('instance-select')" in load_config
+    assert 'select.value !== state.selectedInstance' in load_config
+    assert 'state.selectedInstance = select.value' in load_config

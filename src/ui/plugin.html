@@ -408,6 +408,22 @@
       renderSelector(res.data.instances_by_client);
       renderClientList(res.data.instances_by_client);
       refreshKnownClients();
+
+      // Building <option> elements never fires 'change' — the browser
+      // auto-picks the first one once instances exist, but state.
+      // selectedInstance (only ever set by the 'change' listener) stays
+      // '', so every tab keeps showing "Elegí una instancia arriba" even
+      // though the selector visibly already shows an instance. Sync once
+      // here so the first configured instance loads without the operator
+      // having to manually re-pick it.
+      var select = document.getElementById('instance-select');
+      if (select.value && select.value !== state.selectedInstance) {
+        state.selectedInstance = select.value;
+        var chip = document.getElementById('instance-chip');
+        chip.textContent = 'seleccionada';
+        chip.className = 'chip';
+        refreshTab(activeTabName());
+      }
     });
   }
 
