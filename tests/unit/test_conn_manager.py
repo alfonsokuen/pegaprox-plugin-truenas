@@ -47,12 +47,12 @@ def test_get_connection_threads_tls_server_name_from_instance_cfg():
     # cert bound to a DNS name (confirmed live 2026-07-20 against .64) —
     # conn_manager must pass this through, not just use_tls/verify_tls.
     cfg = _instance_cfg()
-    cfg['tls_server_name'] = 'nube.idkmanager.com'
+    cfg['tls_server_name'] = 'nas-remote.example.com'
 
     mgr = ConnectionManager(client_factory=lambda **kw: _FakeClient(**kw))
     client = mgr.get_connection(cfg)
 
-    assert client.tls_server_name == 'nube.idkmanager.com'
+    assert client.tls_server_name == 'nas-remote.example.com'
 
 
 def test_get_connection_creates_and_reuses_same_client():

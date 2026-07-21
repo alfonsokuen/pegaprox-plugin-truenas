@@ -327,12 +327,12 @@ the end, a real WebSocket session) shook out three things, in this order:
    real JSON-RPC 2.0 handler. `/api/current` was right from the start;
    `ws_client.url()` reverted.
 3. **TLS/SNI mismatch discovered by the above test**: `.64`'s cert is
-   issued for `CN=nube.idkmanager.com`, not for its LAN IP — connecting by
+   issued for `CN=nas-remote.example.com`, not for its LAN IP — connecting by
    IP with `verify_tls: true` failed with "IP address mismatch" even though
    the cert itself is valid. Added `tls_server_name` (optional, per
    instance): overrides the TLS/SNI verification name independently of the
    literal dial host, so the plugin can connect by LAN IP while verifying
-   against `nube.idkmanager.com`. Threaded through
+   against `nas-remote.example.com`. Threaded through
    `TrueNASWSClient.__init__` → `_default_transport_factory` →
    `websocket.create_connection(..., sslopt={'server_hostname': ...})` →
    `conn_manager` → `config_store`/`config.example.json`.

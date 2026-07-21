@@ -105,7 +105,7 @@ def _default_transport_factory(url, verify_tls, timeout, tls_server_name=None):
     cert is perfectly valid. Setting this overrides the SNI/verification
     name independently of ``url``'s literal host — dial the IP, verify the
     name. Confirmed live against a real instance 2026-07-20 (cert
-    `CN=nube.idkmanager.com`, connection host a LAN IP with no DNS relation
+    `CN=nas-remote.example.com`, connection host a LAN IP with no DNS relation
     to that name).
     """
     import websocket  # intentional lazy import — see module docstring

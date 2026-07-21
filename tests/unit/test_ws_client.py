@@ -924,7 +924,7 @@ def test_default_transport_factory_disables_recv_timeout(monkeypatch):
 # ---------------------------------------------------------------------------
 # Regression: real TrueNAS instances are commonly reached by LAN IP but
 # present a CA-issued cert bound to a DNS name (confirmed live 2026-07-20
-# against .64: cert CN=nube.idkmanager.com, dialed via IP 192.0.2.64) —
+# against .64: cert CN=nas-remote.example.com, dialed via IP 192.0.2.64) —
 # verify_tls=True must not fail with "IP address mismatch" when the caller
 # supplies the correct SNI/verification name separately from the dial host.
 # ---------------------------------------------------------------------------
@@ -945,9 +945,9 @@ def test_default_transport_factory_passes_server_hostname_for_sni(monkeypatch):
 
     from core.ws_client import _default_transport_factory
     _default_transport_factory(
-        'wss://192.0.2.64:444/api/current', True, 10.0, tls_server_name='nube.idkmanager.com')
+        'wss://192.0.2.64:444/api/current', True, 10.0, tls_server_name='nas-remote.example.com')
 
-    assert captured['sslopt'] == {'server_hostname': 'nube.idkmanager.com'}
+    assert captured['sslopt'] == {'server_hostname': 'nas-remote.example.com'}
 
 
 def test_default_transport_factory_no_server_hostname_verifies_against_url_host(monkeypatch):
@@ -982,10 +982,10 @@ def test_client_threads_tls_server_name_through_to_transport_factory():
 
     client = TrueNASWSClient(
         host='192.0.2.64', port=444, use_tls=True, verify_tls=True,
-        tls_server_name='nube.idkmanager.com', transport_factory=fake_factory)
+        tls_server_name='nas-remote.example.com', transport_factory=fake_factory)
     client.connect()
 
-    assert captured['tls_server_name'] == 'nube.idkmanager.com'
+    assert captured['tls_server_name'] == 'nas-remote.example.com'
     _shutdown(client, ft)
 
 
