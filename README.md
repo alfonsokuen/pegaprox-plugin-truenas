@@ -74,8 +74,8 @@ against any instance in this repo's tests or code; the operator connects
 ## Multi-tenant (brief §3.1)
 
 This plugin will eventually manage TrueNAS instances belonging to
-**different clients** in the same panel (IDKmanager, SACEI, INGESA,
-GeoSpace, ...), not just the operator's own infrastructure. Every instance
+**different clients** in the same panel (e.g. `acme`, `globex`, `initech`,
+...), not just the operator's own infrastructure. Every instance
 in `config.json` carries a free-form `client_id` field from F0 onward — the
 Settings UI and the instance selector group by it. **F0 does not yet call
 PegaProx's `check_cluster_access`** for per-client scoping — that mapping
@@ -104,7 +104,7 @@ Each entry in `instances[]`:
 |---|---|
 | `id` | Stable identifier, unique within this plugin's config |
 | `name` | Display name |
-| `client_id` | Free-form tenant namespace (`idkmanager`, `sacei`, ...) |
+| `client_id` | Free-form tenant namespace (`idkmanager`, `acme`, ...) |
 | `host` / `port` | TrueNAS UI host and port |
 | `use_tls` | **Must be `true`** whenever an API key is set — TrueNAS auto-revokes a key used over plain HTTP. `config/save` rejects the combination. |
 | `verify_tls` | Whether to verify the appliance's TLS certificate (usually self-signed → `false`) |
@@ -192,9 +192,9 @@ top, see above.)
   wrap these in a job) is reported as `pending` with a re-check path, not
   actively polled to completion.
 - No `check_cluster_access` per-client RBAC — admin-only gate until a second
-  real client (SACEI/INGESA/GeoSpace) is on-boarded.
-- No installation on CT119, no connection to any instance besides `.64` —
-  both require explicit operator confirmation in a separate session
+  real client is on-boarded.
+- No connection to any instance besides `.64` yet — onboarding a second real
+  client requires explicit operator confirmation in a separate session
   (brief §0.5).
 
 ## Development

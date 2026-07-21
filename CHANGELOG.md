@@ -360,7 +360,7 @@ health is meaningfully better than the ~2-month-old ops memory assumed:
 - Per-instance connection manager (`src/core/conn_manager.py`), lazy-connect,
   multi-instance from day one.
 - Multi-tenant config schema (`config.example.json`): every instance carries
-  a free-form `client_id` (`idkmanager`, `sacei`, `ingesa`, `geospace`, ...)
+  a free-form `client_id` (`idkmanager`, `acme`, `globex`, `initech`, ...)
   so the plugin can host TrueNAS instances belonging to different clients in
   the same PegaProx panel — the field is persisted and used to group the
   Settings UI and instance selector; the real `check_cluster_access` gate per

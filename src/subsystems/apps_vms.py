@@ -12,7 +12,7 @@ reversion, not evidence the namespace is stable across every instance. NO
 ``virt.instance.*`` shim is implemented in F1: it would be speculative code
 for a namespace that isn't in use on the only instance this plugin talks to
 today. Add the shim (``core/compat.py``, per the brief's file layout) IF a
-future instance (SACEI/INGESA/GeoSpace, or `.64` itself after an upgrade)
+future instance (another client's TrueNAS, or `.64` itself after an upgrade)
 proves ``vm.query`` 404s/errors and ``virt.instance.query`` is what answers
 instead — don't build it blind now.
 """

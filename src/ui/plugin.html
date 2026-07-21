@@ -208,7 +208,7 @@
       </div>
       <div class="field">
         <label>Cliente (client_id)</label>
-        <input type="text" id="f-client" list="known-clients" placeholder="idkmanager, sacei, ingesa, geospace…">
+        <input type="text" id="f-client" list="known-clients" placeholder="e.g. acme-corp, client-b…">
         <datalist id="known-clients"></datalist>
       </div>
       <div class="field-row tri">
@@ -306,7 +306,7 @@
     var root = document.getElementById('instances-by-client');
     root.innerHTML = '';
     if (!groups || !groups.length) {
-      root.innerHTML = '<div class="empty">no instances configured — usá "Nueva instancia" para dar de alta la primera (p.ej. TrueNAS .64 de IDKmanager).</div>';
+      root.innerHTML = '<div class="empty">no instances configured — usá "Nueva instancia" para dar de alta la primera.</div>';
       return;
     }
     groups.forEach(function (group) {

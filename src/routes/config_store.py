@@ -8,8 +8,8 @@ verified in production by ``pegaprox-plugin-wake-on-lan``: GET always masks
 unchanged must NOT clobber the previously stored key with an empty value.
 
 Multi-tenant (brief §3.1, 2026-07-20 adjustment): every instance carries a
-free-form ``client_id`` (e.g. ``"idkmanager"``, ``"sacei"``, ``"ingesa"``,
-``"geospace"``) so the plugin can eventually host TrueNAS instances that
+free-form ``client_id`` (e.g. ``"idkmanager"``, ``"acme"``, ``"globex"``,
+``"initech"``) so the plugin can eventually host TrueNAS instances that
 belong to different clients in the same PegaProx panel. It is NOT sensitive
 — never masked, always shown in clear so the UI can group by client and
 writers (F2+) can display it prominently in confirmation dialogs. F0 only

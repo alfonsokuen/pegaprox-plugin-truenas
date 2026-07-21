@@ -83,9 +83,9 @@ def test_validate_instances_rejects_http_with_api_key():
 
 
 def test_validate_instances_preserves_client_id():
-    clean, err = config_store.validate_instances([_instance(client_id='sacei')], [])
+    clean, err = config_store.validate_instances([_instance(client_id='acme')], [])
     assert err is None
-    assert clean[0]['client_id'] == 'sacei'
+    assert clean[0]['client_id'] == 'acme'
 
 
 def test_validate_instances_defaults_missing_client_id_to_unassigned():
@@ -98,12 +98,12 @@ def test_validate_instances_defaults_missing_client_id_to_unassigned():
 
 def test_group_by_client_groups_in_first_seen_order():
     instances = [
-        _instance(id_='a', client_id='sacei'),
+        _instance(id_='a', client_id='acme'),
         _instance(id_='b', client_id='idkmanager'),
-        _instance(id_='c', client_id='sacei'),
+        _instance(id_='c', client_id='acme'),
     ]
     groups = config_store.group_by_client(instances)
-    assert [g['client_id'] for g in groups] == ['sacei', 'idkmanager']
+    assert [g['client_id'] for g in groups] == ['acme', 'idkmanager']
     assert len(groups[0]['instances']) == 2
     assert len(groups[1]['instances']) == 1
 
