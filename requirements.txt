@@ -7,3 +7,10 @@
 # Python environment from a mirror reachable from the LAN). That step is
 # explicitly OUT of scope for F0 (see README.md "Pendiente de F0-deploy").
 websocket-client>=1.8,<2
+
+# cryptography's Fernet encrypts api_key_ro/api_key_rw at rest in
+# config.json (F3, 2026-07-21). Not vendored: confirmed already present in
+# PegaProx's own venv on CT119 (v49.0.0) as a transitive dependency of
+# PegaProx itself, so this declares the real dependency rather than
+# silently riding on the host happening to already have it.
+cryptography>=42

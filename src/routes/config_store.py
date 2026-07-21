@@ -21,6 +21,8 @@ import json
 import logging
 import os
 
+from cryptography.fernet import Fernet, InvalidToken
+
 log = logging.getLogger('plugin.truenas.config_store')
 
 DEFAULT_POLL = {'fast_s': 10, 'slow_s': 60, 'cold_s': 900}
@@ -28,9 +30,73 @@ DEFAULT_THRESHOLDS = {'warn_pct': 80, 'crit_pct': 90}
 MASK = '***'
 _KEY_FIELDS = ('api_key_ro', 'api_key_rw')
 
+# F3 (2026-07-21): api_key_ro/api_key_rw are encrypted at rest — config.json
+# used to hold them in clear text with chmod 600 as the only protection.
+# Versioned prefix so a future format change (enc:v2:) never gets confused
+# with v1 tokens, and so a value WITHOUT the prefix is unambiguously legacy
+# plaintext from before this existed (migrated transparently on next save,
+# never a hard cutover that could brick an existing deploy).
+ENC_PREFIX = 'enc:v1:'
+_SECRET_KEY_FILENAME = 'secret.key'
+
 
 def default_config():
     return {'instances': [], 'poll': dict(DEFAULT_POLL), 'thresholds': dict(DEFAULT_THRESHOLDS)}
+
+
+def _load_or_create_fernet(config_path):
+    """Return a ``Fernet`` built from ``secret.key`` next to ``config_path``,
+    generating it on first use. MUST read an existing key rather than ever
+    regenerating one — every previously-encrypted api_key_ro/api_key_rw
+    becomes permanently undecryptable the moment the key changes, so this
+    only ever writes the file when it doesn't already exist."""
+    key_path = os.path.join(os.path.dirname(config_path) or '.', _SECRET_KEY_FILENAME)
+    try:
+        with open(key_path, 'rb') as f:
+            key = f.read().strip()
+    except FileNotFoundError:
+        key = Fernet.generate_key()
+        tmp = key_path + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(key)
+        os.replace(tmp, key_path)
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError as e:
+            log.warning(f'[truenas] could not chmod 600 {key_path!r}: {e}')
+        log.info(f'[truenas] generated a new encryption key at {key_path!r}')
+    return Fernet(key)
+
+
+def encrypt_value(value, fernet):
+    """Encrypt a plaintext API key for storage. Falsy values (None/"") pass
+    through unchanged — "no key configured" must stay indistinguishable
+    from itself before/after this feature, never become an encrypted empty
+    string that then fails to decrypt back to ''."""
+    if not value:
+        return value
+    return ENC_PREFIX + fernet.encrypt(value.encode()).decode()
+
+
+def decrypt_value(stored, fernet, label):
+    """Decrypt a stored field back to plaintext for in-memory use. A value
+    with no ``enc:v1:`` prefix is legacy plaintext from before this existed
+    — passed through as-is, transparently re-encrypted on the next save
+    (see ``save_config``). A value that HAS the prefix but fails to decrypt
+    (corrupt ciphertext, or secret.key was lost/replaced) must never crash
+    the whole config load or silently return garbage — logged loudly and
+    treated as unset, same recovery path as any other "no key configured"
+    state: the operator re-pastes it from Settings."""
+    if not stored or not stored.startswith(ENC_PREFIX):
+        return stored
+    token = stored[len(ENC_PREFIX):]
+    try:
+        return fernet.decrypt(token.encode()).decode()
+    except InvalidToken:
+        log.error(f"[truenas] {label}: stored value is encrypted but failed to decrypt "
+                  f"(corrupt ciphertext, or secret.key changed) — treating as unset; "
+                  f"the operator must re-enter it from Settings")
+        return None
 
 
 def load_config(path):
@@ -61,6 +127,14 @@ def load_config(path):
     cfg.setdefault('instances', [])
     if not isinstance(cfg['instances'], list):
         cfg['instances'] = []
+    fernet = _load_or_create_fernet(path)
+    cfg['instances'] = [
+        dict(inst, **{
+            f: decrypt_value(inst.get(f), fernet, f"instance '{inst.get('id', '?')}'.{f}")
+            for f in _KEY_FIELDS
+        })
+        for inst in cfg['instances']
+    ]
     poll = dict(DEFAULT_POLL)
     poll.update(cfg.get('poll') or {})
     cfg['poll'] = poll
@@ -72,10 +146,20 @@ def load_config(path):
 
 def save_config(path, cfg):
     """Atomic write (tmp + os.replace) + chmod 600, same pattern as
-    wake-on-lan's ``_save_config``."""
+    wake-on-lan's ``_save_config``. Encrypts api_key_ro/api_key_rw before
+    writing (F3) — callers always work with plaintext in memory; only the
+    on-disk copy is encrypted. Builds a NEW instances list for the on-disk
+    version rather than mutating ``cfg`` in place, since callers keep using
+    the same ``cfg``/instance dicts (in plaintext) after this returns."""
+    fernet = _load_or_create_fernet(path)
+    on_disk = dict(cfg)
+    on_disk['instances'] = [
+        dict(inst, **{f: encrypt_value(inst.get(f), fernet) for f in _KEY_FIELDS})
+        for inst in cfg.get('instances', [])
+    ]
     tmp = path + '.tmp'
     with open(tmp, 'w') as f:
-        json.dump(cfg, f, indent=2)
+        json.dump(on_disk, f, indent=2)
     os.replace(tmp, path)
     try:
         os.chmod(path, 0o600)

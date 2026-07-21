@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.13.0] - 2026-07-21 (encrypt api_key_ro/api_key_rw at rest)
+
+Second item of the config-audit backlog: `config.json` held TrueNAS API
+keys in clear text, `chmod 600` the only protection — confirmed live
+against the real deployed file. No shared PegaProx secrets mechanism
+exists (checked: pegaprox-plugin-opnsense stores its own keys the same
+plain way), so this is self-contained by design rather than riding on
+something that doesn't exist yet.
+
+- Random 32-byte key generated on first use into `secret.key` next to
+  `config.json` (chmod 600, **never** regenerated once it exists —
+  regenerating it would permanently orphan every previously-encrypted
+  key). `cryptography`'s `Fernet` (confirmed already present in PegaProx's
+  own venv, v49.0.0 on CT119 — no vendoring needed) — its encrypt-then-MAC
+  construction is what makes a tampered/corrupt token fail loudly
+  (`InvalidToken`) instead of silently decrypting to garbage.
+- Per-field, not per-file: only `api_key_ro`/`api_key_rw` are encrypted
+  (versioned `enc:v1:` prefix) — the rest of `config.json` (host, ports,
+  client_id, thresholds) stays plain and diffable.
+- Transparent migration: a value with no `enc:v1:` prefix is legacy
+  plaintext from before this existed, loaded as-is and re-encrypted on the
+  next save — no forced migration step, no cutover that could lock anyone
+  out. Encryption is fully encapsulated inside `config_store.py`'s
+  load/save boundary: every other module (api.py, conn_manager, the UI)
+  still only ever sees plaintext in memory, unchanged.
+- **Threat model, stated plainly**: this protects against `config.json`
+  being copied out on its own (a stray backup, a bucket with a weak ACL) —
+  it does **not** protect against root on CT119 (reads `secret.key` just
+  as easily) or a full LXC backup (the key travels inside it). Closing
+  that gap needs an external KMS, a different project, not attempted here.
+- Verified: 399 tests green (8 new — migration, restart-decrypts, wrong-key
+  rejection, corrupted-ciphertext-fails-loud). Migration also verified live
+  against the REAL production `config.json` (backed up first): loaded,
+  saved, confirmed the file gained the `enc:v1:` prefix, and the decrypted
+  round-trip matched the pre-migration value byte-for-byte — compared by
+  hash, the real key value was never printed anywhere.
+
 ## [0.12.0] - 2026-07-21 (Settings: delete instance + configurable alert thresholds)
 
 Operator audit of the Settings tab ("no veo que pueda configurar mucho desde

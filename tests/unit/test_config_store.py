@@ -2,6 +2,7 @@
 """config_store: masking round-trip, client_id passthrough (unmasked),
 use_tls safety guard, poll validation, atomic save."""
 
+import json
 import logging
 import os
 
@@ -281,6 +282,108 @@ def test_validate_instances_override_against_custom_global_thresholds_passes():
     assert err is None
     assert clean[0]['warn_pct'] == 95
     assert clean[0]['crit_pct'] is None
+
+
+# ---------------------------------------------------------------------------
+# F3: encrypt api_key_ro/api_key_rw at rest — config.json used to hold them
+# in clear text with chmod 600 as the only protection.
+# ---------------------------------------------------------------------------
+
+def test_save_config_writes_encrypted_keys_not_plaintext(tmp_path):
+    path = str(tmp_path / 'config.json')
+    config_store.save_config(path, {
+        'instances': [_instance(api_key_ro='super-secret-ro')],
+        'poll': config_store.DEFAULT_POLL,
+    })
+    with open(path) as f:
+        raw = f.read()
+    assert 'super-secret-ro' not in raw
+    assert config_store.ENC_PREFIX in raw
+
+
+def test_save_then_load_round_trips_key_back_to_plaintext(tmp_path):
+    """Restart-decrypts: everything above config_store's load/save boundary
+    only ever sees plaintext — a fresh load_config() call (simulating a
+    process restart) must decrypt transparently."""
+    path = str(tmp_path / 'config.json')
+    config_store.save_config(path, {
+        'instances': [_instance(api_key_ro='super-secret-ro')],
+        'poll': config_store.DEFAULT_POLL,
+    })
+    loaded = config_store.load_config(path)
+    assert loaded['instances'][0]['api_key_ro'] == 'super-secret-ro'
+
+
+def test_legacy_plaintext_key_migrates_transparently_on_next_save(tmp_path):
+    """A config.json written before F3 existed has api_key_ro in clear text
+    with no enc:v1: prefix. Loading it must return the plaintext as-is (no
+    crash, no double-encryption), and the NEXT save must encrypt it."""
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps({
+        'instances': [_instance(api_key_ro='pre-f3-plaintext-key')],
+        'poll': config_store.DEFAULT_POLL,
+    }))
+
+    loaded = config_store.load_config(str(path))
+    assert loaded['instances'][0]['api_key_ro'] == 'pre-f3-plaintext-key'
+
+    config_store.save_config(str(path), loaded)
+    raw = path.read_text()
+    assert 'pre-f3-plaintext-key' not in raw
+    assert config_store.ENC_PREFIX in raw
+    # And it still round-trips correctly after migrating.
+    reloaded = config_store.load_config(str(path))
+    assert reloaded['instances'][0]['api_key_ro'] == 'pre-f3-plaintext-key'
+
+
+def test_encrypt_value_leaves_falsy_values_unchanged(tmp_path):
+    fernet = config_store._load_or_create_fernet(str(tmp_path / 'config.json'))
+    assert config_store.encrypt_value(None, fernet) is None
+    assert config_store.encrypt_value('', fernet) == ''
+
+
+def test_decrypt_value_leaves_unprefixed_legacy_plaintext_unchanged(tmp_path):
+    fernet = config_store._load_or_create_fernet(str(tmp_path / 'config.json'))
+    assert config_store.decrypt_value('plain-old-key', fernet, 'label') == 'plain-old-key'
+    assert config_store.decrypt_value(None, fernet, 'label') is None
+
+
+def test_decrypt_value_on_corrupted_ciphertext_fails_loud_not_silent(tmp_path, caplog):
+    """Fernet's authenticated encryption (encrypt-then-MAC) must actually be
+    exercised here, not just trusted by assumption: a tampered/corrupt
+    enc:v1: token must be REJECTED, logged clearly, and degrade to None
+    (recoverable: operator re-pastes the key) — never decrypt to garbage
+    bytes and never crash the caller."""
+    fernet = config_store._load_or_create_fernet(str(tmp_path / 'config.json'))
+    corrupted = config_store.ENC_PREFIX + 'not-a-real-fernet-token'
+    with caplog.at_level(logging.ERROR, logger='plugin.truenas.config_store'):
+        result = config_store.decrypt_value(corrupted, fernet, "instance 'x'.api_key_ro")
+    assert result is None
+    assert any('failed to decrypt' in r.message for r in caplog.records)
+
+
+def test_wrong_secret_key_cannot_decrypt_another_key_s_ciphertext(tmp_path):
+    """A ciphertext encrypted under one secret.key must not decrypt under a
+    DIFFERENT key — proves this isn't just base64 obfuscation."""
+    dir_a, dir_b = tmp_path / 'a', tmp_path / 'b'
+    dir_a.mkdir()
+    dir_b.mkdir()
+    fernet_a = config_store._load_or_create_fernet(str(dir_a / 'config.json'))
+    fernet_b = config_store._load_or_create_fernet(str(dir_b / 'config.json'))
+    token = config_store.encrypt_value('some-secret', fernet_a)
+    assert config_store.decrypt_value(token, fernet_b, 'label') is None
+
+
+def test_load_or_create_fernet_reuses_an_existing_key_file(tmp_path):
+    """MUST read an existing secret.key rather than ever regenerating one —
+    a regenerated key would permanently orphan every previously-encrypted
+    value. Two calls against the same config path must yield the SAME key
+    (proven by cross-decrypting a token between the two Fernet instances)."""
+    path = str(tmp_path / 'config.json')
+    fernet_1 = config_store._load_or_create_fernet(path)
+    token = config_store.encrypt_value('a-secret', fernet_1)
+    fernet_2 = config_store._load_or_create_fernet(path)
+    assert config_store.decrypt_value(token, fernet_2, 'label') == 'a-secret'
 
 
 def test_save_config_logs_warning_when_chmod_fails(tmp_path, monkeypatch, caplog):
