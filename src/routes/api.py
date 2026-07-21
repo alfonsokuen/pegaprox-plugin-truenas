@@ -141,6 +141,7 @@ def config_handler():
         'instances': masked,
         'instances_by_client': config_store.group_by_client(masked),
         'poll': cfg['poll'],
+        'thresholds': cfg['thresholds'],
     })
 
 
@@ -158,8 +159,16 @@ def config_save_handler():
     body = raw_body if isinstance(raw_body, dict) else {}
     old_cfg = config_store.load_config(CONFIG_PATH)
 
+    # Thresholds validate first: an instance's optional warn_pct/crit_pct
+    # override is checked against the EFFECTIVE (override-or-global) pair,
+    # so validate_instances needs the resolved global thresholds already
+    # in hand.
+    thresholds, err = config_store.validate_thresholds(body.get('thresholds'))
+    if err:
+        return jsonify({'error': err}), 400
+
     instances, err = config_store.validate_instances(
-        body.get('instances'), old_cfg['instances'])
+        body.get('instances'), old_cfg['instances'], thresholds)
     if err:
         return jsonify({'error': err}), 400
 
@@ -167,7 +176,7 @@ def config_save_handler():
     if err:
         return jsonify({'error': err}), 400
 
-    cfg = {'instances': instances, 'poll': poll}
+    cfg = {'instances': instances, 'poll': poll, 'thresholds': thresholds}
     try:
         config_store.save_config(CONFIG_PATH, cfg)
     except OSError as e:
@@ -178,8 +187,23 @@ def config_save_handler():
     # Credentials/host may have changed — drop any live sockets so the next
     # call reconnects against the freshly saved config, never a stale key.
     conn_manager.close_all()
+
+    # Audit trail used to just say "N instance(s)" regardless of whether an
+    # instance was added, edited, or deleted — indistinguishable from the
+    # log alone. A deleted instance in particular deserves to be named: it's
+    # the one config change that discards a stored API key with no way back
+    # short of re-pasting it.
+    old_ids = {i['id'] for i in old_cfg['instances']}
+    new_ids = {i['id'] for i in instances}
+    detail_parts = [f'{len(instances)} instance(s)']
+    added = sorted(new_ids - old_ids)
+    removed = sorted(old_ids - new_ids)
+    if added:
+        detail_parts.append('added=' + ','.join(added))
+    if removed:
+        detail_parts.append('removed=' + ','.join(removed))
     log_audit(user=_username(), action='truenas.config_saved',
-              details=f'{len(instances)} instance(s)')
+              details=' '.join(detail_parts))
     return jsonify({'ok': True, 'instances': len(instances)})
 
 

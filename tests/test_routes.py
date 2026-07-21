@@ -47,6 +47,71 @@ def test_config_save_handler_rejects_invalid_instance(plugin, tmp_plugin_dir, mo
     assert status == 400
 
 
+def test_config_save_handler_removing_an_instance_deletes_it_and_closes_connections(
+        plugin, tmp_plugin_dir, monkeypatch):
+    """F1: the Settings UI has no dedicated delete route — it re-saves the
+    full instance list with the deleted one omitted. This is the regression
+    test for that path: the instance must actually disappear from
+    config.json, AND close_all() must run so no stale WS client keeps
+    reconnecting against an instance PegaProx no longer knows about."""
+    config_store.save_config(routes_api.CONFIG_PATH, {
+        'instances': [_instance(id_='keep-me'), _instance(id_='delete-me')],
+        'poll': config_store.DEFAULT_POLL,
+    })
+    closed = {'called': False}
+    monkeypatch.setattr(routes_api.conn_manager, 'close_all',
+                         lambda: closed.__setitem__('called', True))
+    monkeypatch.setattr(routes_api.request, 'get_json',
+                         lambda silent=False: {'instances': [_instance(id_='keep-me')], 'poll': {}})
+
+    routes_api.config_save_handler()
+
+    saved = config_store.load_config(routes_api.CONFIG_PATH)
+    assert [i['id'] for i in saved['instances']] == ['keep-me']
+    assert closed['called'] is True
+
+
+def test_config_save_handler_audit_logs_added_and_removed_instances(
+        plugin, tmp_plugin_dir, monkeypatch):
+    config_store.save_config(routes_api.CONFIG_PATH, {
+        'instances': [_instance(id_='old-one')],
+        'poll': config_store.DEFAULT_POLL,
+    })
+    captured = {}
+    monkeypatch.setattr(routes_api, 'log_audit',
+                         lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(routes_api.request, 'get_json',
+                         lambda silent=False: {'instances': [_instance(id_='new-one')], 'poll': {}})
+
+    routes_api.config_save_handler()
+
+    assert 'added=new-one' in captured['details']
+    assert 'removed=old-one' in captured['details']
+
+
+def test_config_handler_includes_thresholds(plugin, tmp_plugin_dir, monkeypatch):
+    resp = routes_api.config_handler()
+    _, payload = resp
+    assert payload['thresholds'] == config_store.DEFAULT_THRESHOLDS
+
+
+def test_config_save_handler_persists_custom_thresholds(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instances': [], 'poll': {}, 'thresholds': {'warn_pct': 70, 'crit_pct': 85},
+    })
+    routes_api.config_save_handler()
+    saved = config_store.load_config(routes_api.CONFIG_PATH)
+    assert saved['thresholds'] == {'warn_pct': 70, 'crit_pct': 85}
+
+
+def test_config_save_handler_rejects_invalid_thresholds(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instances': [], 'poll': {}, 'thresholds': {'warn_pct': 95, 'crit_pct': 90},
+    })
+    resp, status = routes_api.config_save_handler()
+    assert status == 400
+
+
 def test_instances_test_handler_requires_host_and_key(plugin, tmp_plugin_dir, monkeypatch):
     monkeypatch.setattr(routes_api.request, 'get_json',
                          lambda silent=False: {'id': '', 'host': '', 'port': 443})

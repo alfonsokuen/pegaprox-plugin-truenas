@@ -240,6 +240,51 @@ def test_nfs_share_rendered_by_singular_path_field_not_a_paths_array():
     assert 's.paths' not in section
 
 
+def test_instance_delete_is_wired_with_typed_confirmation_not_a_bare_button():
+    """F2026-07-21 config audit finding #1: the Settings tab could add/edit
+    an instance but never delete one — saveInstances() only ever did
+    filter(...).concat([draft]), no path ever omitted an id. Guards against
+    reintroducing that gap AND against a bare unconfirmed delete: the
+    confirm button must stay disabled until the typed input matches the
+    instance id exactly (same convention as dataset/snapshot/share deletes)."""
+    html = _read_ui()
+    assert 'function openDeleteConfirm(inst)' in html
+    assert "this.value.trim() !== deleteTargetId" in html
+    assert "existing.filter(function (i) { return i.id !== deleteTargetId; });" in html
+
+
+def test_deleting_an_instance_reuses_the_existing_save_path_not_a_new_route():
+    """There is no dedicated instances/delete backend route — config/save
+    already replaces the full instance list, so delete is just 'omit this
+    id, save'. A new route would duplicate validation/close_all()/audit
+    logic that config/save already has correctly."""
+    html = _read_ui()
+    delete_fn = html.split('function openDeleteConfirm(inst)')[1].split('function parseOptionalPct')[0]
+    assert 'saveInstances(next)' in delete_fn
+    assert 'instances/delete' not in html
+
+
+def test_alert_thresholds_are_configurable_not_hardcoded_to_80():
+    """F2026-07-21 config audit finding #4: pctTone/ringGauge hardcoded an
+    80% warn line with no crit distinction at all. Guards against
+    reintroducing either gap: pctTone must take a real {warn_pct, crit_pct}
+    pair and return a 3rd 'stat-err' state, and no call site may pass a
+    bare numeric 80 anymore."""
+    html = _read_ui()
+    assert 'function pctTone(pct, thresholds)' in html
+    assert "if (pct >= t.crit_pct) return 'stat-err';" in html
+    assert 'function instanceThresholds(inst)' in html
+    assert ', 80)' not in html
+    assert 'warnAt' not in html
+
+
+def test_settings_tab_exposes_global_threshold_inputs():
+    html = _read_ui()
+    assert 'id="f-thresh-warn"' in html
+    assert 'id="f-thresh-crit"' in html
+    assert "id='btn-save-thresholds'" in html or 'id="btn-save-thresholds"' in html
+
+
 def test_share_delete_confirms_against_real_name_or_path_not_the_opaque_id():
     """An SMB/NFS share's id is an opaque integer TrueNAS assigns — typing
     it to confirm a delete would be meaningless to an operator. The typed

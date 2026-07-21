@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.12.0] - 2026-07-21 (Settings: delete instance + configurable alert thresholds)
+
+Operator audit of the Settings tab ("no veo que pueda configurar mucho desde
+el plugin... está bien rudimentaria toda la parte de configuración"): the
+form could add and edit an instance but never delete one, and the 80% ring/
+bar warn line was a bare JS literal with no crit distinction at all. First
+two items of a 4-part backlog (delete+cleanup, encrypt-at-rest, configurable
+thresholds, notifications) planned with `arquitecto`; F3/F4 land in
+follow-up releases since each has its own in-CT119 verification gate.
+
+- **Delete instance**: `saveInstances()` only ever did
+  `filter(...).concat([draft])` — no code path ever omitted an id. There is
+  no new backend route: `config/save` already replaces the full instance
+  list and already calls `conn_manager.close_all()` on every save (dropping
+  any live socket to the removed instance for free), so delete is just
+  "omit this id from the array, save" on the frontend. Typed confirmation
+  (must type the instance id exactly) mirrors the existing
+  dataset/snapshot/share delete convention in this same file, applied here
+  since discarding an instance also discards its stored API key with no way
+  back short of re-pasting it.
+- Audit trail improvement: `truenas.config_saved` used to log just
+  `"N instance(s)"` regardless of what changed — now includes
+  `added=`/`removed=` ids when applicable, so a delete is traceable in the
+  log without diffing config.json snapshots by hand.
+- **Configurable alert thresholds**: `pctTone`/`ringGauge` hardcoded an 80%
+  warn line with no critical distinction. New global `thresholds.{warn_pct,
+  crit_pct}` pair (defaults 80/90, same validate-and-persist shape as
+  `poll.*`), with an optional per-instance override (either side
+  independently, validated against the EFFECTIVE pair so e.g. overriding
+  only `warn_pct` above the global `crit_pct` is still rejected). `pctTone`
+  is now genuinely 3-state (`stat-ok`/`stat-warn`/`stat-err`) instead of
+  binary — Fleet's aggregate capacity card, per-instance capacity bars, and
+  the Pools tab ring all get real use of the new `crit_pct` level, not just
+  a parameterized version of the old single threshold.
+- Verified: 391 tests green (25 new). Visually verified against a mock with
+  custom global thresholds and one instance overriding just `warn_pct`
+  before deploying.
+
 ## [0.11.1] - 2026-07-21 (telemetry: one Red card per interface, not just the first)
 
 Operator noticed on the freshly-deployed 0.11.0 charts: "por que solo veo

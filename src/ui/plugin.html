@@ -391,11 +391,45 @@
   </section>
 
   <section class="tab" id="tab-settings">
+    <div class="card" id="thresholds-card">
+      <h2 style="margin:0 0 8px;font-size:15px;">Umbrales de alerta (global)</h2>
+      <div class="subtab-hint" style="margin-bottom:8px">
+        Controlan quién se pinta amarillo/rojo en Fleet y Pools. Cualquier instancia puede
+        pisarlos individualmente desde su "Opciones avanzadas".
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Advertencia (%)</label><input type="number" id="f-thresh-warn" min="1" max="99" value="80"></div>
+        <div class="field"><label>Crítico (%)</label><input type="number" id="f-thresh-crit" min="1" max="99" value="90"></div>
+        <div class="field" style="justify-content:flex-end;display:flex;align-items:flex-end">
+          <button class="btn secondary" id="btn-save-thresholds">Guardar umbrales</button>
+        </div>
+      </div>
+      <div id="thresholds-result"></div>
+    </div>
+
     <div class="toolbar">
       <h2 style="margin:0;font-size:15px;">Instancias configuradas</h2>
       <button class="btn" id="btn-new-instance">+ Nueva instancia</button>
     </div>
     <div id="instances-by-client"><div class="empty">Cargando…</div></div>
+
+    <div class="card" id="instance-delete-card" hidden>
+      <h2>Eliminar instancia</h2>
+      <div class="subtab-hint">
+        Esto deja de administrar <b id="del-inst-name"></b> desde PegaProx — los datos y pools
+        en TrueNAS no se tocan. Si la volvés a agregar más adelante vas a necesitar pegar la
+        API key de nuevo (no se recupera).
+      </div>
+      <div class="field">
+        <label>Escribí el ID exacto para confirmar: <b id="del-inst-id"></b></label>
+        <input type="text" id="f-delete-confirm" autocomplete="off">
+      </div>
+      <div class="row-actions">
+        <button class="btn" id="btn-delete-confirm" disabled>Eliminar definitivamente</button>
+        <button class="btn secondary" id="btn-delete-cancel">Cancelar</button>
+      </div>
+      <div id="delete-result"></div>
+    </div>
 
     <div class="card" id="instance-form-card" hidden>
       <h2 id="instance-form-title">Nueva instancia</h2>
@@ -426,6 +460,10 @@
           <label>tls_server_name — nombre del certificado, si el host se marca por IP</label>
           <input type="text" id="f-tls-name" placeholder="p.ej. nas.miempresa.com">
         </div>
+        <div class="field-row">
+          <div class="field"><label>Umbral advertencia (%) — vacío = usar el global</label><input type="number" id="f-warn-pct" min="1" max="99" placeholder="80"></div>
+          <div class="field"><label>Umbral crítico (%) — vacío = usar el global</label><input type="number" id="f-crit-pct" min="1" max="99" placeholder="90"></div>
+        </div>
       </div>
       <div class="row-actions">
         <button class="btn secondary" id="btn-test">Probar conexión</button>
@@ -447,6 +485,7 @@
 
   var API_BASE = '/api/plugins/truenas/api/';
   var state = { config: null, editingId: null, selectedInstance: '', loadedTabs: {} };
+  var DEFAULT_THRESHOLDS = { warn_pct: 80, crit_pct: 90 };
 
   function api(path, opts) {
     opts = opts || {};
@@ -559,6 +598,11 @@
         editBtn.textContent = 'Editar';
         editBtn.addEventListener('click', function () { openForm(inst); });
         tr.querySelector('td:last-child').appendChild(editBtn);
+        var deleteBtn = document.createElement('button');
+        deleteBtn.className = 'btn secondary';
+        deleteBtn.textContent = 'Eliminar';
+        deleteBtn.addEventListener('click', function () { openDeleteConfirm(inst); });
+        tr.querySelector('td:last-child').appendChild(deleteBtn);
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
@@ -575,6 +619,7 @@
 
   // -- instance form (create/edit + test connection) --------------------
   function openForm(inst) {
+    closeDeleteConfirm();
     state.editingId = inst ? inst.id : null;
     document.getElementById('instance-form-card').hidden = false;
     document.getElementById('instance-form-title').textContent = inst ? 'Editar instancia' : 'Nueva instancia';
@@ -587,6 +632,8 @@
     document.getElementById('f-key').value = inst && inst.api_key_ro ? inst.api_key_ro : '';
     document.getElementById('f-key-rw').value = inst && inst.api_key_rw ? inst.api_key_rw : '';
     document.getElementById('f-tls-name').value = inst && inst.tls_server_name ? inst.tls_server_name : '';
+    document.getElementById('f-warn-pct').value = inst && inst.warn_pct != null ? inst.warn_pct : '';
+    document.getElementById('f-crit-pct').value = inst && inst.crit_pct != null ? inst.crit_pct : '';
     document.getElementById('f-tls').checked = inst ? !!inst.use_tls : true;
     document.getElementById('f-verify').checked = inst ? !!inst.verify_tls : false;
     document.getElementById('f-readonly').checked = inst ? !!inst.readonly : true;
@@ -595,7 +642,7 @@
     // Auto-expand advanced fields when editing an instance that already has
     // something set there — an operator revisiting an RW-enabled instance
     // shouldn't have to know to click "Opciones avanzadas" first.
-    var hasAdvanced = !!((inst && inst.api_key_rw) || (inst && inst.tls_server_name));
+    var hasAdvanced = !!(inst && (inst.api_key_rw || inst.tls_server_name || inst.warn_pct != null || inst.crit_pct != null));
     document.getElementById('advanced-fields').hidden = !hasAdvanced;
     document.getElementById('btn-toggle-advanced').textContent = hasAdvanced ? 'Opciones avanzadas ▴' : 'Opciones avanzadas ▾';
   }
@@ -612,6 +659,62 @@
     state.editingId = null;
   }
 
+  // -- delete instance (typed confirmation, same convention as the
+  // dataset/snapshot destructive-write cards further down) -------------
+  var deleteTargetId = null;
+
+  function openDeleteConfirm(inst) {
+    closeForm();
+    deleteTargetId = inst.id;
+    document.getElementById('del-inst-name').textContent = inst.name || inst.id;
+    document.getElementById('del-inst-id').textContent = inst.id;
+    document.getElementById('f-delete-confirm').value = '';
+    document.getElementById('btn-delete-confirm').disabled = true;
+    document.getElementById('delete-result').textContent = '';
+    document.getElementById('delete-result').className = '';
+    document.getElementById('instance-delete-card').hidden = false;
+  }
+
+  function closeDeleteConfirm() {
+    document.getElementById('instance-delete-card').hidden = true;
+    deleteTargetId = null;
+  }
+
+  document.getElementById('f-delete-confirm').addEventListener('input', function () {
+    document.getElementById('btn-delete-confirm').disabled = (this.value.trim() !== deleteTargetId);
+  });
+
+  document.getElementById('btn-delete-cancel').addEventListener('click', closeDeleteConfirm);
+
+  document.getElementById('btn-delete-confirm').addEventListener('click', function () {
+    var btn = this;
+    var existing = (state.config && state.config.instances) || [];
+    var next = existing.filter(function (i) { return i.id !== deleteTargetId; });
+    var out = document.getElementById('delete-result');
+    btn.disabled = true;
+    saveInstances(next).then(function (res) {
+      if (res.status === 200) {
+        closeDeleteConfirm();
+        loadConfig();
+      } else {
+        out.className = 'err';
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'no se pudo eliminar');
+        btn.disabled = false;
+      }
+    }).catch(function (e) {
+      out.className = 'err';
+      out.textContent = 'Error de red: ' + e;
+      btn.disabled = false;
+    });
+  });
+
+  function parseOptionalPct(elId) {
+    var raw = document.getElementById(elId).value;
+    if (raw === '' || raw == null) return null;
+    var n = parseInt(raw, 10);
+    return isNaN(n) ? null : n;
+  }
+
   function formToInstance() {
     return {
       id: document.getElementById('f-id').value.trim(),
@@ -625,6 +728,8 @@
       api_key_rw: document.getElementById('f-key-rw').value || null,
       tls_server_name: document.getElementById('f-tls-name').value.trim() || null,
       readonly: document.getElementById('f-readonly').checked,
+      warn_pct: parseOptionalPct('f-warn-pct'),
+      crit_pct: parseOptionalPct('f-crit-pct'),
     };
   }
 
@@ -649,6 +754,9 @@
       renderSelector(res.data.instances_by_client);
       renderClientList(res.data.instances_by_client);
       refreshKnownClients();
+      var thresholds = res.data.thresholds || DEFAULT_THRESHOLDS;
+      document.getElementById('f-thresh-warn').value = thresholds.warn_pct;
+      document.getElementById('f-thresh-crit').value = thresholds.crit_pct;
 
       // Building <option> elements never fires 'change' — the browser
       // auto-picks the first one once instances exist, but state.
@@ -671,9 +779,45 @@
   function saveInstances(nextInstances) {
     return api('config/save', {
       method: 'POST',
-      body: { instances: nextInstances, poll: state.config ? state.config.poll : undefined },
+      body: {
+        instances: nextInstances,
+        poll: state.config ? state.config.poll : undefined,
+        thresholds: state.config ? state.config.thresholds : undefined,
+      },
     });
   }
+
+  document.getElementById('btn-save-thresholds').addEventListener('click', function () {
+    var btn = this;
+    var out = document.getElementById('thresholds-result');
+    var warn = parseInt(document.getElementById('f-thresh-warn').value, 10);
+    var crit = parseInt(document.getElementById('f-thresh-crit').value, 10);
+    out.className = '';
+    out.textContent = 'Guardando…';
+    btn.disabled = true;
+    api('config/save', {
+      method: 'POST',
+      body: {
+        instances: (state.config && state.config.instances) || [],
+        poll: state.config ? state.config.poll : undefined,
+        thresholds: { warn_pct: warn, crit_pct: crit },
+      },
+    }).then(function (res) {
+      btn.disabled = false;
+      if (res.status === 200) {
+        out.className = 'ok';
+        out.textContent = 'Umbrales guardados.';
+        loadConfig().then(function () { refreshTab(activeTabName()); });
+      } else {
+        out.className = 'err';
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'no se pudo guardar');
+      }
+    }).catch(function (e) {
+      btn.disabled = false;
+      out.className = 'err';
+      out.textContent = 'Error de red: ' + e;
+    });
+  });
 
   document.getElementById('btn-new-instance').addEventListener('click', function () { openForm(null); });
   document.getElementById('btn-cancel-instance').addEventListener('click', closeForm);
@@ -923,15 +1067,53 @@
   // since there's no prior state to transition FROM on first render).
   var RING_R = 42, RING_C = 2 * Math.PI * RING_R;
 
-  function pctTone(pct, warnAt) {
-    return pct >= (warnAt == null ? 80 : warnAt) ? 'stat-warn' : '';
+  // Three-state (ok/warn/crit) tone from a {warn_pct, crit_pct} pair —
+  // falls back to DEFAULT_THRESHOLDS when called before config has loaded
+  // (e.g. a stray render during the very first paint). ok is '' rather than
+  // 'stat-ok' here because ring/bar fills use an unstyled default for ok
+  // (see .ring-fill / .bar-list-fill CSS); cardTone() below is the
+  // explicit-'stat-ok' variant that .bento .card needs instead.
+  function pctTone(pct, thresholds) {
+    var t = thresholds || DEFAULT_THRESHOLDS;
+    if (pct >= t.crit_pct) return 'stat-err';
+    if (pct >= t.warn_pct) return 'stat-warn';
+    return '';
+  }
+
+  function cardTone(pct, thresholds) {
+    var tone = pctTone(pct, thresholds);
+    return tone || 'stat-ok';
+  }
+
+  // Effective thresholds for a given instance config object: its own
+  // warn_pct/crit_pct override each independently, falling back to the
+  // global pair per-field (an instance may only override one side).
+  function instanceThresholds(inst) {
+    var global = (state.config && state.config.thresholds) || DEFAULT_THRESHOLDS;
+    if (!inst) return global;
+    return {
+      warn_pct: inst.warn_pct != null ? inst.warn_pct : global.warn_pct,
+      crit_pct: inst.crit_pct != null ? inst.crit_pct : global.crit_pct,
+    };
+  }
+
+  function findConfigInstance(id) {
+    var list = (state.config && state.config.instances) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i];
+    }
+    return null;
+  }
+
+  function currentInstanceConfig() {
+    return findConfigInstance(state.selectedInstance);
   }
 
   function ringGauge(pct, opts) {
     opts = opts || {};
     var safePct = Math.max(0, Math.min(100, pct || 0));
     var offset = RING_C * (1 - safePct / 100);
-    var tone = opts.tone || pctTone(safePct, opts.warnAt);
+    var tone = opts.tone || pctTone(safePct, opts.thresholds);
     var titleText = (opts.caption ? opts.caption + ': ' : '') + safePct.toFixed(1) + '%' +
       (opts.detail ? ' (' + opts.detail + ')' : '');
     return '<svg class="ring-gauge" viewBox="0 0 100 100" role="img" aria-label="' + esc(titleText) + '">' +
@@ -950,7 +1132,7 @@
     return '<div class="bar-list-row">' +
       '<div class="bar-list-label" title="' + esc(label) + '">' + esc(label) +
         (sub ? ' <span class="bar-list-sub">' + esc(sub) + '</span>' : '') + '</div>' +
-      '<div class="bar-list-track"><div class="bar-list-fill ' + (tone || pctTone(safePct)) + '" data-grow-to="' + safePct + '%"></div></div>' +
+      '<div class="bar-list-track"><div class="bar-list-fill ' + (tone || pctTone(safePct, state.config && state.config.thresholds)) + '" data-grow-to="' + safePct + '%"></div></div>' +
       '<div class="bar-list-value">' + esc(valueText) + '</div>' +
       '</div>';
   }
@@ -992,10 +1174,11 @@
       '<div class="stat">' + agg.instance_count + '</div>' +
       '<div>' + agg.healthy_count + ' OK · ' + agg.degraded_count + ' degradada(s) · ' +
       agg.unreachable_count + ' caída(s)</div></div>';
-    html += '<div class="card ' + (agg.capacity_pct != null && agg.capacity_pct >= 80 ? 'stat-warn' : 'stat-ok') +
+    var globalThresholds = (state.config && state.config.thresholds) || DEFAULT_THRESHOLDS;
+    html += '<div class="card ' + (agg.capacity_pct != null ? cardTone(agg.capacity_pct, globalThresholds) : 'stat-ok') +
       '"><div class="stat-label">' + ICONS.pools + 'Capacidad agregada</div>' +
       (agg.capacity_pct != null
-        ? '<div class="ring-row">' + ringGauge(agg.capacity_pct, { caption: 'Uso', warnAt: 80 }) +
+        ? '<div class="ring-row">' + ringGauge(agg.capacity_pct, { caption: 'Uso', thresholds: globalThresholds }) +
           '<div><div style="font-size:13px">' + formatBytes(agg.capacity_used) + '</div>' +
           '<div class="subtab-hint" style="margin:0">de ' + formatBytes(agg.capacity_size) + '</div></div></div>'
         : '<div class="stat">?</div>') +
@@ -1021,8 +1204,14 @@
         html += poolRow(!inst.critical_alert_count, 'Alertas críticas', inst.critical_alert_count || 0);
         html += poolRow(!downServices.length, 'Servicios caídos',
           downServices.length ? downServices.join(', ') : 'ninguno');
+        // inst here is the /fleet route's aggregate summary object, which
+        // has no warn_pct/crit_pct of its own — those only live on the
+        // config.json instance record managed from Settings. Must look it
+        // up by id rather than pass inst straight through, or a per-instance
+        // override silently never applies on the Fleet tab.
+        var instThresholds = instanceThresholds(findConfigInstance(inst.id));
         var pct = inst.capacity_size ? (inst.capacity_used / inst.capacity_size * 100) : 0;
-        html += poolRow(pct < 80, 'Uso',
+        html += poolRow(pct < instThresholds.warn_pct, 'Uso',
           formatBytes(inst.capacity_used) + ' / ' + formatBytes(inst.capacity_size) +
           (inst.capacity_size ? ' (' + pct.toFixed(1) + '%)' : ''));
         // Slim bar restates the SAME 'Uso' row above for fast side-by-side
@@ -1032,8 +1221,8 @@
         // reasons unrelated to capacity, e.g. a down service, and the bar
         // shouldn't paint over that as fine).
         if (inst.capacity_size) {
-          var cardTone = fleetStatusClass(inst);
-          var barTone = cardTone === 'stat-ok' ? pctTone(pct, 80) : cardTone;
+          var instCardTone = fleetStatusClass(inst);
+          var barTone = instCardTone === 'stat-ok' ? pctTone(pct, instThresholds) : instCardTone;
           html += '<div class="bar-list-track" style="margin-top:2px">' +
             '<div class="bar-list-fill ' + barTone + '" data-grow-to="' + pct + '%"></div></div>';
         }
@@ -1314,6 +1503,7 @@
     body.className = '';
     var pools = data.pools || [], temps = data.temperatures || {};
     if (!pools.length) { body.className = 'empty'; body.innerHTML = 'Sin pools.'; return; }
+    var thresholds = instanceThresholds(currentInstanceConfig());
     var html = updatedAtHtml();
     html += '<div class="pool-grid">';
     pools.forEach(function (p) {
@@ -1327,12 +1517,12 @@
       if (p.size) {
         html += '<div class="ring-row">' + ringGauge(usedPct, {
           caption: 'Uso',
-          tone: !p.healthy ? 'stat-err' : pctTone(usedPct, 80),
+          tone: !p.healthy ? 'stat-err' : pctTone(usedPct, thresholds),
         }) + '<div><div style="font-size:13px">' + formatBytes(p.allocated) + '</div>' +
           '<div class="subtab-hint" style="margin:0">de ' + formatBytes(p.size) + '</div></div></div>';
       }
       html += poolRow(!!p.healthy, 'Pool Status', p.status || '?');
-      html += poolRow(usedPct < 80, 'Used Space',
+      html += poolRow(usedPct < thresholds.warn_pct, 'Used Space',
         formatBytes(p.allocated) + ' of ' + formatBytes(p.size) + ' (' + usedPct.toFixed(1) + '%)');
       html += poolRow(disks.errored === 0, 'Disks with Errors', disks.errored + ' of ' + disks.total);
       html += poolRow(!p.scan || p.scan.state !== 'SCANNING', 'Last Scrub', lastScrubText(p.scan));

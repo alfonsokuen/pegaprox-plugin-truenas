@@ -187,6 +187,102 @@ def test_load_config_missing_file_does_not_log_an_error(tmp_path, caplog):
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
+# ---------------------------------------------------------------------------
+# F2: configurable alert thresholds (global pair + optional per-instance
+# override) — replaces the hardcoded 80% warn line the charts used to paint
+# every ring/bar with.
+# ---------------------------------------------------------------------------
+
+def test_default_config_includes_thresholds():
+    assert config_store.default_config()['thresholds'] == config_store.DEFAULT_THRESHOLDS
+
+
+def test_load_config_merges_partial_thresholds(tmp_path):
+    path = tmp_path / 'config.json'
+    path.write_text('{"instances": [], "thresholds": {"crit_pct": 95}}')
+    cfg = config_store.load_config(str(path))
+    # warn_pct absent in the file -> falls back to the default; crit_pct
+    # present -> overrides it. Same merge shape as poll's fast_s/slow_s/cold_s.
+    assert cfg['thresholds'] == {'warn_pct': 80, 'crit_pct': 95}
+
+
+def test_validate_thresholds_defaults_when_absent():
+    thresholds, err = config_store.validate_thresholds(None)
+    assert err is None
+    assert thresholds == config_store.DEFAULT_THRESHOLDS
+
+
+def test_validate_thresholds_accepts_a_valid_override():
+    thresholds, err = config_store.validate_thresholds({'warn_pct': 70, 'crit_pct': 85})
+    assert err is None
+    assert thresholds == {'warn_pct': 70, 'crit_pct': 85}
+
+
+def test_validate_thresholds_rejects_non_integer():
+    thresholds, err = config_store.validate_thresholds({'warn_pct': 'high'})
+    assert thresholds is None
+    assert 'warn_pct' in err
+
+
+def test_validate_thresholds_rejects_out_of_range():
+    thresholds, err = config_store.validate_thresholds({'crit_pct': 150})
+    assert thresholds is None
+    assert 'crit_pct' in err
+
+
+def test_validate_thresholds_rejects_warn_at_or_above_crit():
+    thresholds, err = config_store.validate_thresholds({'warn_pct': 90, 'crit_pct': 90})
+    assert thresholds is None
+    assert 'warn_pct' in err and 'crit_pct' in err
+
+
+def test_validate_instances_accepts_per_instance_threshold_override():
+    inst = _instance()
+    inst['warn_pct'] = 60
+    inst['crit_pct'] = 75
+    clean, err = config_store.validate_instances([inst], [])
+    assert err is None
+    assert clean[0]['warn_pct'] == 60
+    assert clean[0]['crit_pct'] == 75
+
+
+def test_validate_instances_override_defaults_to_none_when_absent():
+    clean, err = config_store.validate_instances([_instance()], [])
+    assert err is None
+    assert clean[0]['warn_pct'] is None
+    assert clean[0]['crit_pct'] is None
+
+
+def test_validate_instances_rejects_out_of_range_instance_threshold():
+    inst = _instance()
+    inst['warn_pct'] = 0
+    clean, err = config_store.validate_instances([inst], [])
+    assert clean is None
+    assert 'warn_pct' in err
+
+
+def test_validate_instances_checks_override_against_effective_global_pair():
+    """Overriding ONLY warn_pct to a value at/above the (unoverridden) global
+    crit_pct must still be rejected — the effective pair is what's checked,
+    not the instance's two raw fields in isolation."""
+    inst = _instance()
+    inst['warn_pct'] = 95
+    global_thresholds = {'warn_pct': 80, 'crit_pct': 90}
+    clean, err = config_store.validate_instances([inst], [], global_thresholds)
+    assert clean is None
+    assert 'warn_pct' in err and 'crit_pct' in err
+
+
+def test_validate_instances_override_against_custom_global_thresholds_passes():
+    inst = _instance()
+    inst['warn_pct'] = 95
+    global_thresholds = {'warn_pct': 80, 'crit_pct': 99}
+    clean, err = config_store.validate_instances([inst], [], global_thresholds)
+    assert err is None
+    assert clean[0]['warn_pct'] == 95
+    assert clean[0]['crit_pct'] is None
+
+
 def test_save_config_logs_warning_when_chmod_fails(tmp_path, monkeypatch, caplog):
     """config.json holds API keys in clear text — a failed chmod 600 used
     to be swallowed with a bare `except OSError: pass`, hiding a real

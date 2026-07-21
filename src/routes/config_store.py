@@ -24,12 +24,13 @@ import os
 log = logging.getLogger('plugin.truenas.config_store')
 
 DEFAULT_POLL = {'fast_s': 10, 'slow_s': 60, 'cold_s': 900}
+DEFAULT_THRESHOLDS = {'warn_pct': 80, 'crit_pct': 90}
 MASK = '***'
 _KEY_FIELDS = ('api_key_ro', 'api_key_rw')
 
 
 def default_config():
-    return {'instances': [], 'poll': dict(DEFAULT_POLL)}
+    return {'instances': [], 'poll': dict(DEFAULT_POLL), 'thresholds': dict(DEFAULT_THRESHOLDS)}
 
 
 def load_config(path):
@@ -63,6 +64,9 @@ def load_config(path):
     poll = dict(DEFAULT_POLL)
     poll.update(cfg.get('poll') or {})
     cfg['poll'] = poll
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    thresholds.update(cfg.get('thresholds') or {})
+    cfg['thresholds'] = thresholds
     return cfg
 
 
@@ -119,16 +123,25 @@ def find_instance(instances, instance_id):
     return None
 
 
-def validate_instances(raw_instances, old_instances):
+def validate_instances(raw_instances, old_instances, global_thresholds=None):
     """Validate + round-trip masked keys. Returns (clean_list, error_or_None).
 
     Enforces the brief's hard safety rule: ``use_tls`` must be true whenever
     either API key is (or will remain) set — TrueNAS auto-revokes a key used
     over plain HTTP, so shipping a config that pairs a real key with
     ``use_tls: false`` is a footgun the plugin refuses to save.
+
+    ``global_thresholds`` (defaults to ``DEFAULT_THRESHOLDS`` when omitted,
+    so existing call sites that pre-date per-instance thresholds keep
+    working unchanged) is the ALREADY-VALIDATED global warn/crit pair — an
+    instance's optional ``warn_pct``/``crit_pct`` override is checked against
+    the EFFECTIVE pair (override-or-global for each side independently),
+    not against itself in isolation, so e.g. overriding only ``warn_pct``
+    to a value above the global ``crit_pct`` is still rejected.
     """
     if not isinstance(raw_instances, list):
         return None, 'instances must be a list'
+    global_thresholds = global_thresholds or DEFAULT_THRESHOLDS
 
     seen_ids = set()
     clean = []
@@ -176,6 +189,29 @@ def validate_instances(raw_instances, old_instances):
                 f"configurada (TrueNAS revoca la key automáticamente sobre HTTP plano)"
             )
 
+        inst_warn = inst_crit = None
+        for field, attr in (('warn_pct', 'inst_warn'), ('crit_pct', 'inst_crit')):
+            raw_value = raw.get(field)
+            if raw_value is None or raw_value == '':
+                continue
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                return None, f"instance '{inst_id}': {field} must be an integer"
+            if not (1 <= parsed <= 99):
+                return None, f"instance '{inst_id}': {field} must be between 1 and 99"
+            if attr == 'inst_warn':
+                inst_warn = parsed
+            else:
+                inst_crit = parsed
+        effective_warn = inst_warn if inst_warn is not None else global_thresholds['warn_pct']
+        effective_crit = inst_crit if inst_crit is not None else global_thresholds['crit_pct']
+        if effective_warn >= effective_crit:
+            return None, (
+                f"instance '{inst_id}': warn_pct must be less than crit_pct "
+                f"(effective {effective_warn} >= {effective_crit})"
+            )
+
         clean.append({
             'id': inst_id,
             'name': str(raw.get('name') or inst_id),
@@ -193,8 +229,34 @@ def validate_instances(raw_instances, old_instances):
             'api_key_ro': keys['api_key_ro'],
             'api_key_rw': keys['api_key_rw'],
             'readonly': bool(raw.get('readonly', True)),
+            'warn_pct': inst_warn,
+            'crit_pct': inst_crit,
         })
     return clean, None
+
+
+def validate_thresholds(raw):
+    """Validate the global alert-threshold pair (brief for the F2
+    configurable-thresholds workstream). Mirrors ``validate_poll``'s shape:
+    a missing/partial dict fills in from ``DEFAULT_THRESHOLDS``, an invalid
+    one is rejected outright rather than silently clamped."""
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    if raw is None:
+        return thresholds, None
+    if not isinstance(raw, dict):
+        return None, 'thresholds must be an object'
+    for key in ('warn_pct', 'crit_pct'):
+        if key in raw:
+            try:
+                value = int(raw[key])
+            except (TypeError, ValueError):
+                return None, f'thresholds.{key} must be an integer'
+            if not (1 <= value <= 99):
+                return None, f'thresholds.{key} must be between 1 and 99'
+            thresholds[key] = value
+    if thresholds['warn_pct'] >= thresholds['crit_pct']:
+        return None, 'thresholds.warn_pct must be less than thresholds.crit_pct'
+    return thresholds, None
 
 
 def validate_poll(raw_poll):
