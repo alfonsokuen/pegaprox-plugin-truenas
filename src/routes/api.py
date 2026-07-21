@@ -10,7 +10,7 @@ register new verbs):
   POST instances/test                      -> connect+login only      (admin)
   GET  system|pools|datasets|snapshots|
        shares|replication|apps_vms|
-       services|data_protection            -> subsystem read (F1/F4a/F6) (storage.view)
+       services|data_protection|telemetry  -> subsystem read (F1/F4a/F6/telemetry) (storage.view)
   GET  fleet                               -> cross-instance summary (F3) (storage.view)
 
 Every F1 subsystem route takes ``instance_id`` as a QUERY PARAM (e.g.
@@ -53,6 +53,7 @@ import subsystems.datasets as datasets_mod
 import subsystems.fleet as fleet_mod
 import subsystems.services as services_mod
 import subsystems.snapshots as snapshots_mod
+import subsystems.telemetry as telemetry_mod
 from subsystems.apps_vms import apps_vms as apps_vms_subsystem
 from subsystems.data_protection import data_protection as data_protection_subsystem
 from subsystems.datasets import datasets as datasets_subsystem
@@ -65,6 +66,7 @@ from subsystems.shares import shares as shares_subsystem
 from subsystems.snapshots import list_tasks as snapshots_list_tasks
 from subsystems.snapshots import snapshots as snapshots_subsystem
 from subsystems.system import alerts as system_alerts
+from subsystems.system import info as system_info
 from subsystems.system import system as system_subsystem
 from subsystems.system import update_status as system_update_status
 from . import config_store
@@ -395,6 +397,23 @@ def services_handler():
 
 def data_protection_handler():
     return _subsystem_route(data_protection_subsystem.list)
+
+
+def _telemetry_fetch(conn):
+    """Needs ``system.info``'s ``physmem`` to turn memory's raw 'available
+    bytes' series into a used%; a second, independent ``system.info`` call
+    from the one the Overview tab's own 'system' route makes — cheap, and
+    keeps this route self-contained rather than coupling to another
+    route's fetch order."""
+    info, info_error = safe_call('system.info', lambda: system_info(conn), {})
+    data = telemetry_mod.telemetry(conn, physmem=info.get('physmem'))
+    if info_error:
+        data['physmem_error'] = info_error
+    return data
+
+
+def telemetry_handler():
+    return _subsystem_route(_telemetry_fetch)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1046,7 @@ ROUTES = {
     'apps_vms': apps_vms_handler,
     'services': services_handler,
     'data_protection': data_protection_handler,
+    'telemetry': telemetry_handler,
     'fleet': fleet_handler,
     'writes/dry-run': writes_dry_run_handler,
     'writes/execute': writes_execute_handler,

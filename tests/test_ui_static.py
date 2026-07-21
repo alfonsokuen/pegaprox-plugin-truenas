@@ -188,3 +188,23 @@ def test_data_protection_tab_never_renders_raw_credentials_or_keys():
     section = html.split('function renderDataProtection(body, data)')[1].split('function renderSimpleTable')[0]
     for forbidden in ['.credentials', '.privatekey', '.certificate)', 't.CSR', 'chain_list']:
         assert forbidden not in section
+
+
+def test_overview_fetches_and_renders_telemetry_sparklines():
+    """Charts (2026-07-20): the CPU/Memory/Network graphs requested after
+    the native-TrueNAS-dashboard screenshot, explicitly deferred until
+    after the Storage grid ('gráficos después') — now built."""
+    html = _read_ui()
+    assert "fetchSubsystem('telemetry')" in html
+    assert 'function renderTelemetryCards(telemetry)' in html
+    assert 'function renderOverview(body, sysRes, poolsRes, telemetryRes)' in html
+    assert 'function renderSparkline(series, opts)' in html
+    assert 'function renderDualSparkline(series, opts)' in html
+
+
+def test_memory_sparkline_is_clamped_0_to_100_percent_not_auto_scaled():
+    """Memory is a used-percentage (0-100) — auto-scaling its min/max like
+    a generic sparkline would exaggerate small fluctuations into a
+    misleading full-height swing."""
+    html = _read_ui()
+    assert "renderSparkline(telemetry.memory, { min: 0, max: 100" in html

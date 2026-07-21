@@ -132,6 +132,11 @@
   .bento .card.stat-ok { border-top-color: var(--ok); }
   .bento .card.stat-warn { border-top-color: var(--warn); }
   .bento .card.stat-err { border-top-color: var(--err); }
+  .telemetry-row { margin-top: -4px; }
+  .telemetry-card .sparkline { width: 100%; height: 56px; display: block; margin-top: 6px; }
+  .telemetry-card .sparkline-value {
+    font-size: 18px; font-variant-numeric: tabular-nums; margin-top: 4px; font-weight: 500;
+  }
   .stat-label {
     font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
     display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
@@ -673,8 +678,9 @@
     body.textContent = 'Cargando…';
 
     if (tab === 'overview') {
-      Promise.all([fetchSubsystem('system'), fetchSubsystem('pools')]).then(function (results) {
-        renderOverview(body, results[0], results[1]);
+      Promise.all([fetchSubsystem('system'), fetchSubsystem('pools'), fetchSubsystem('telemetry')])
+        .then(function (results) {
+        renderOverview(body, results[0], results[1], results[2]);
         state.loadedTabs[cacheKey] = true;
       }).catch(function (e) {
         // Without this, a network failure (proxy down, PegaProx session
@@ -863,7 +869,81 @@
     body.innerHTML = html;
   }
 
-  function renderOverview(body, sysRes, poolsRes) {
+  // -- Telemetry sparklines (CPU/memory/network) — hand-rolled SVG, no
+  // charting library (CT119 has no internet access to fetch one from a
+  // CDN). Series are ``[timestamp, value]`` pairs (or ``[ts, rx, tx]`` for
+  // network), already downsampled server-side to at most ~120 points.
+  var SPARKLINE_W = 260, SPARKLINE_H = 56;
+
+  function sparklinePoints(series, valueIndex, width, height, min, max) {
+    var range = (max - min) || 1;
+    var stepX = series.length > 1 ? width / (series.length - 1) : 0;
+    return series.map(function (row, i) {
+      var v = row[valueIndex];
+      var y = v == null ? height : height - ((v - min) / range) * height;
+      return (i * stepX).toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+  }
+
+  function renderSparkline(series, opts) {
+    opts = opts || {};
+    if (!series || !series.length) {
+      return '<div class="subtab-hint">Sin datos de telemetría.</div>';
+    }
+    var values = series.map(function (r) { return r[1]; }).filter(function (v) { return v != null; });
+    var min = opts.min != null ? opts.min : Math.min.apply(null, values.concat([0]));
+    var max = opts.max != null ? opts.max : Math.max.apply(null, values.concat([1]));
+    var points = sparklinePoints(series, 1, SPARKLINE_W, SPARKLINE_H, min, max);
+    var last = values.length ? values[values.length - 1] : null;
+    var label = last == null ? '?' : (opts.format ? opts.format(last) : last.toFixed(1));
+    return '<svg class="sparkline" viewBox="0 0 ' + SPARKLINE_W + ' ' + SPARKLINE_H + '" preserveAspectRatio="none">' +
+      '<polyline points="' + points + '" fill="none" stroke="' + (opts.color || 'var(--accent)') + '" stroke-width="1.5"/>' +
+      '</svg><div class="sparkline-value">' + esc(label) + '</div>';
+  }
+
+  function renderDualSparkline(series, opts) {
+    opts = opts || {};
+    if (!series || !series.length) {
+      return '<div class="subtab-hint">Sin datos de telemetría.</div>';
+    }
+    var allValues = [];
+    series.forEach(function (r) { allValues.push(r[1], r[2]); });
+    allValues = allValues.filter(function (v) { return v != null; });
+    var min = Math.min.apply(null, allValues.concat([0]));
+    var max = Math.max.apply(null, allValues.concat([1]));
+    var rxPoints = sparklinePoints(series, 1, SPARKLINE_W, SPARKLINE_H, min, max);
+    var txPoints = sparklinePoints(series, 2, SPARKLINE_W, SPARKLINE_H, min, max);
+    var lastRow = series[series.length - 1];
+    var fmt = opts.format || function (v) { return v.toFixed(1); };
+    return '<svg class="sparkline" viewBox="0 0 ' + SPARKLINE_W + ' ' + SPARKLINE_H + '" preserveAspectRatio="none">' +
+      '<polyline points="' + rxPoints + '" fill="none" stroke="var(--ok)" stroke-width="1.5"/>' +
+      '<polyline points="' + txPoints + '" fill="none" stroke="var(--accent)" stroke-width="1.5"/>' +
+      '</svg><div class="sparkline-value">↓' + esc(fmt(lastRow[1])) + ' ↑' + esc(fmt(lastRow[2])) + '</div>';
+  }
+
+  function renderTelemetryCards(telemetry) {
+    var html = '<div class="bento telemetry-row">';
+    html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'CPU</div>' +
+      (telemetry.cpu_error
+        ? '<div class="subtab-hint">' + esc(telemetry.cpu_error) + '</div>'
+        : renderSparkline(telemetry.cpu, { format: function (v) { return v.toFixed(1) + '%'; } })) +
+      '</div>';
+    html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'Memoria</div>' +
+      (telemetry.memory_error
+        ? '<div class="subtab-hint">' + esc(telemetry.memory_error) + '</div>'
+        : renderSparkline(telemetry.memory, { min: 0, max: 100, color: 'var(--ok)', format: function (v) { return v.toFixed(1) + '%'; } })) +
+      '</div>';
+    html += '<div class="card telemetry-card"><div class="stat-label">' + ICONS.system + 'Red' +
+      (telemetry.network_interface ? ' (' + esc(telemetry.network_interface) + ')' : '') + '</div>' +
+      (telemetry.network_error
+        ? '<div class="subtab-hint">' + esc(telemetry.network_error) + '</div>'
+        : renderDualSparkline(telemetry.network, { format: function (v) { return formatBytes(v) + '/s'; } })) +
+      '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderOverview(body, sysRes, poolsRes, telemetryRes) {
     body.className = '';
     if (sysRes.status !== 200 || poolsRes.status !== 200) {
       body.innerHTML = '<div class="empty">' +
@@ -872,6 +952,7 @@
       return;
     }
     var sys = sysRes.data.data, pools = poolsRes.data.data;
+    var telemetry = telemetryRes && telemetryRes.status === 200 ? telemetryRes.data.data : null;
     var health = sys.health || {};
     var poolHealth = pools.health || {};
     var poolList = pools.pools || [];
@@ -894,6 +975,10 @@
       '<div class="stat" style="font-size:14px">' + esc((sys.info || {}).version || '?') + '</div>' +
       '<div>' + esc((sys.info || {}).hostname || '') + '</div></div>';
     html += '</div>';
+
+    if (telemetry) {
+      html += renderTelemetryCards(telemetry);
+    }
 
     if (scanning.length) {
       html += '<div class="card"><h2>Resilver/scrub en curso</h2>';

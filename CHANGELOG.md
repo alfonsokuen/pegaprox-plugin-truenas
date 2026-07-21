@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.8.0] - 2026-07-20 (Overview telemetry: CPU/memory/network sparklines)
+
+Second-to-last item of the 4-item batch. What the operator asked for after
+sharing a screenshot of TrueNAS's own native dashboard, explicitly
+deferred until after the Storage grid ("gráficos después") — now built.
+
+Backed by `reporting.get_data`, confirmed live before writing code:
+- CPU's `legend` is `['time', 'cpu', 'cpu0', 'cpu1', ...]` — index 1
+  ('cpu') is the aggregate/all-core %; the rest are per-core, unused here.
+- Memory's `legend` is `['time', 'available']` — bytes still free, NOT a
+  used-percentage. Converted using `system.info`'s `physmem` (total
+  bytes), fetched once per telemetry request.
+- Network needs a real interface `identifier` — passing `None`/`'*'`
+  silently returns zero rows (not an error). Resolved via
+  `interface.query`'s first configured interface; multi-NIC/bonded setups
+  aren't disambiguated in this first pass (the resolved name is returned
+  alongside the series so the UI labels it honestly rather than hiding
+  the ambiguity).
+- A 1-hour window returns ~3600 one-second rows per metric — downsampled
+  server-side to at most 120 points before it ever reaches the wire.
+
+`subsystems/telemetry.py`: each series (`safe_call`-isolated, same pattern
+as every other multi-call subsystem) so a hung network graph never hides
+working CPU/memory. New `GET telemetry` route, fetched alongside
+`system`/`pools` by the Overview tab. Hand-rolled SVG sparklines (no
+charting library — CT119 has no internet access to fetch one from a CDN):
+`renderSparkline`/`renderDualSparkline` draw a `<polyline>` from the
+downsampled series; memory is clamped to a fixed 0-100% scale (a
+used-percentage auto-scaled like a generic series would exaggerate small
+swings into a misleading full-height chart).
+
+- 332 tests (up from 318).
+
 ## [0.7.0] - 2026-07-20 (F6: data-protection posture — with a real secret-leak catch)
 
 Third item of the 4-item batch (charts, F4c, F5, F6). Read-only, no

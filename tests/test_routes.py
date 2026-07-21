@@ -1292,3 +1292,25 @@ def test_data_protection_handler_returns_projected_data(plugin, tmp_plugin_dir, 
     _, payload = resp
     assert payload['data']['cloudsync'][0]['description'] == 'nc-sync'
     assert 'SECRET-SHOULD-NOT-LEAK' not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry (Overview CPU/memory/network sparklines).
+# ---------------------------------------------------------------------------
+
+def test_telemetry_handler_converts_memory_to_used_percent(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _seed_instance(routes_api.CONFIG_PATH)
+    monkeypatch.setattr(routes_api.request, 'args', {'instance_id': 'truenas-test'})
+    fake_conn = FakeConn({
+        'system.info': {'physmem': 1000},
+        'reporting.get_data': [{
+            'name': 'memory', 'identifier': 'memory',
+            'legend': ['time', 'available'], 'data': [[100, 500]],
+        }],
+        'interface.query': [],
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_connection', lambda inst: fake_conn)
+    resp = routes_api.telemetry_handler()
+    _, payload = resp
+    assert payload['data']['memory'] == [[100, 50.0]]

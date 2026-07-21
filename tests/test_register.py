@@ -15,7 +15,7 @@ def test_register_wires_all_routes(plugin, monkeypatch):
     expected = {
         'ui', 'config', 'config/save', 'instances/test',
         'system', 'pools', 'datasets', 'snapshots', 'shares',
-        'replication', 'apps_vms', 'services', 'data_protection', 'fleet',
+        'replication', 'apps_vms', 'services', 'data_protection', 'telemetry', 'fleet',
         'writes/dry-run', 'writes/execute',
     }
     assert set(routes) == expected
@@ -29,6 +29,6 @@ def test_plugin_id_matches_manifest(plugin):
     with open(manifest_path) as f:
         manifest = json.load(f)
     assert plugin.PLUGIN_ID == 'truenas'
-    assert manifest['version'] == '0.7.0'
+    assert manifest['version'] == '0.8.0'
     assert manifest['has_frontend'] is True
     assert manifest['frontend_route'] == 'ui'
