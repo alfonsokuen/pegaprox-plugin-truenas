@@ -52,6 +52,7 @@ import subsystems.apps_vms as apps_vms_mod
 import subsystems.datasets as datasets_mod
 import subsystems.fleet as fleet_mod
 import subsystems.services as services_mod
+import subsystems.shares as shares_mod
 import subsystems.snapshots as snapshots_mod
 import subsystems.telemetry as telemetry_mod
 from subsystems.apps_vms import apps_vms as apps_vms_subsystem
@@ -744,6 +745,107 @@ def _verify_app_stopped(conn, payload, result):
     return _verify_app_state(conn, payload, {'STOPPED'})
 
 
+# F4c — SMB/NFS share create/update/delete. Verified live against real,
+# actively-used shares on `.64` ("nextcloud" SMB, "PBS_NFS" NFS backing
+# Proxmox Backup Server) that both are synchronous (no job_id handling
+# needed). Delete's confirmation compares against ``expected_name``/
+# ``expected_path`` the CALLER already knows (the UI row at click-time),
+# not looked up here — see shares.py's module docstring for why an opaque
+# share id can't use the same "id IS the human string" shortcut datasets
+# use.
+
+def _smb_create_build(payload):
+    return shares_mod.build_smb_create_envelope(payload.get('fields') or {})
+
+
+def _smb_create_execute(conn, payload):
+    return shares_mod.smb_create(conn, payload.get('fields') or {})
+
+
+def _verify_smb_created(conn, payload, result):
+    name = (payload.get('fields') or {}).get('name')
+    found = next((s for s in shares_mod.list_smb(conn) if s.get('name') == name), None)
+    return found is not None, found
+
+
+def _smb_update_build(payload):
+    return shares_mod.build_smb_update_envelope(payload.get('share_id'), payload.get('fields') or {})
+
+
+def _smb_update_execute(conn, payload):
+    return shares_mod.smb_update(conn, payload.get('share_id'), payload.get('fields') or {})
+
+
+def _verify_smb_updated(conn, payload, result):
+    found = shares_mod.find_smb(conn, payload.get('share_id'))
+    if found is None:
+        return False, None
+    changes = payload.get('fields') or {}
+    matches = all(found.get(k) == v for k, v in changes.items())
+    return matches, found
+
+
+def _smb_delete_build(payload):
+    return shares_mod.build_smb_delete_envelope(
+        payload.get('share_id'), payload.get('confirm_name'), payload.get('expected_name'))
+
+
+def _smb_delete_execute(conn, payload):
+    return shares_mod.smb_delete(
+        conn, payload.get('share_id'), payload.get('confirm_name'), payload.get('expected_name'))
+
+
+def _verify_smb_deleted(conn, payload, result):
+    found = shares_mod.find_smb(conn, payload.get('share_id'))
+    return found is None, found
+
+
+def _nfs_create_build(payload):
+    return shares_mod.build_nfs_create_envelope(payload.get('fields') or {})
+
+
+def _nfs_create_execute(conn, payload):
+    return shares_mod.nfs_create(conn, payload.get('fields') or {})
+
+
+def _verify_nfs_created(conn, payload, result):
+    path = (payload.get('fields') or {}).get('path')
+    found = next((s for s in shares_mod.list_nfs(conn) if s.get('path') == path), None)
+    return found is not None, found
+
+
+def _nfs_update_build(payload):
+    return shares_mod.build_nfs_update_envelope(payload.get('share_id'), payload.get('fields') or {})
+
+
+def _nfs_update_execute(conn, payload):
+    return shares_mod.nfs_update(conn, payload.get('share_id'), payload.get('fields') or {})
+
+
+def _verify_nfs_updated(conn, payload, result):
+    found = shares_mod.find_nfs(conn, payload.get('share_id'))
+    if found is None:
+        return False, None
+    changes = payload.get('fields') or {}
+    matches = all(found.get(k) == v for k, v in changes.items())
+    return matches, found
+
+
+def _nfs_delete_build(payload):
+    return shares_mod.build_nfs_delete_envelope(
+        payload.get('share_id'), payload.get('confirm_name'), payload.get('expected_path'))
+
+
+def _nfs_delete_execute(conn, payload):
+    return shares_mod.nfs_delete(
+        conn, payload.get('share_id'), payload.get('confirm_name'), payload.get('expected_path'))
+
+
+def _verify_nfs_deleted(conn, payload, result):
+    found = shares_mod.find_nfs(conn, payload.get('share_id'))
+    return found is None, found
+
+
 WRITE_OPS = {
     ('datasets', 'create'): {
         'build': _dataset_create_build, 'execute': _dataset_create_execute,
@@ -800,6 +902,30 @@ WRITE_OPS = {
     ('apps', 'redeploy'): {
         'build': _app_redeploy_build, 'execute': _app_redeploy_execute,
         'verify': _verify_app_running,
+    },
+    ('smb_shares', 'create'): {
+        'build': _smb_create_build, 'execute': _smb_create_execute,
+        'verify': _verify_smb_created,
+    },
+    ('smb_shares', 'update'): {
+        'build': _smb_update_build, 'execute': _smb_update_execute,
+        'verify': _verify_smb_updated,
+    },
+    ('smb_shares', 'delete'): {
+        'build': _smb_delete_build, 'execute': _smb_delete_execute,
+        'verify': _verify_smb_deleted,
+    },
+    ('nfs_shares', 'create'): {
+        'build': _nfs_create_build, 'execute': _nfs_create_execute,
+        'verify': _verify_nfs_created,
+    },
+    ('nfs_shares', 'update'): {
+        'build': _nfs_update_build, 'execute': _nfs_update_execute,
+        'verify': _verify_nfs_updated,
+    },
+    ('nfs_shares', 'delete'): {
+        'build': _nfs_delete_build, 'execute': _nfs_delete_execute,
+        'verify': _verify_nfs_deleted,
     },
 }
 

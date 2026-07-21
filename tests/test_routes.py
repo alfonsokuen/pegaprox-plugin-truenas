@@ -1314,3 +1314,77 @@ def test_telemetry_handler_converts_memory_to_used_percent(
     resp = routes_api.telemetry_handler()
     _, payload = resp
     assert payload['data']['memory'] == [[100, 50.0]]
+
+
+# ---------------------------------------------------------------------------
+# F4c: SMB/NFS share create/update/delete.
+# ---------------------------------------------------------------------------
+
+def test_writes_dry_run_smb_create_returns_method_and_params(
+        plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'smb_shares', 'op': 'create',
+        'payload': {'fields': {'name': 'docs', 'path': '/mnt/tank/docs'}},
+    })
+    resp = routes_api.writes_dry_run_handler()
+    _, payload = resp
+    assert payload['method'] == 'sharing.smb.create'
+    assert payload['params'] == [{'name': 'docs', 'path': '/mnt/tank/docs'}]
+
+
+def test_writes_execute_smb_create_verifies_it_now_exists(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({
+        'sharing.smb.create': {'id': 99, 'name': 'docs'},
+        'sharing.smb.query': [{'id': 99, 'name': 'docs'}],
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'smb_shares', 'op': 'create',
+        'payload': {'fields': {'name': 'docs', 'path': '/mnt/tank/docs'}},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['ok'] is True
+
+
+def test_writes_dry_run_smb_delete_requires_matching_confirmation_400(
+        plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'subsystem': 'smb_shares', 'op': 'delete',
+        'payload': {'share_id': 12, 'confirm_name': 'wrong', 'expected_name': 'nextcloud'},
+    })
+    resp, status = routes_api.writes_dry_run_handler()
+    assert status == 400
+    _, payload = resp
+    assert 'confirmation mismatch' in payload['error']
+
+
+def test_writes_execute_nfs_delete_verifies_it_no_longer_exists(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _writable_instance(routes_api.CONFIG_PATH)
+    fake_conn = FakeConn({
+        'sharing.nfs.delete': True,
+        'sharing.nfs.query': [],  # deleted -> no longer found
+    })
+    monkeypatch.setattr(routes_api.conn_manager, 'get_rw_connection', lambda inst: fake_conn)
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'nfs_shares', 'op': 'delete',
+        'payload': {'share_id': 2, 'confirm_name': '/mnt/Backup_Proxmox/PBS',
+                    'expected_path': '/mnt/Backup_Proxmox/PBS'},
+    })
+    resp = routes_api.writes_execute_handler()
+    _, payload = resp
+    assert payload['ok'] is True
+
+
+def test_writes_execute_smb_update_403_when_instance_is_readonly(
+        plugin, tmp_plugin_dir, monkeypatch):
+    _seed_instance(routes_api.CONFIG_PATH, readonly=True, api_key_rw='real-secret-rw')
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instance_id': 'truenas-test', 'subsystem': 'smb_shares', 'op': 'update',
+        'payload': {'share_id': 12, 'fields': {'comment': 'x'}},
+    })
+    resp, status = routes_api.writes_execute_handler()
+    assert status == 403

@@ -208,3 +208,37 @@ def test_memory_sparkline_is_clamped_0_to_100_percent_not_auto_scaled():
     misleading full-height swing."""
     html = _read_ui()
     assert "renderSparkline(telemetry.memory, { min: 0, max: 100" in html
+
+
+def test_shares_tab_has_smb_nfs_create_edit_delete_wired():
+    """F4c (2026-07-20): SMB/NFS shares get real create/edit/delete via the
+    same writesDryRun/writesExecute flow as datasets/snapshots/services —
+    not a bare read-only table anymore. iSCSI stays read-only."""
+    html = _read_ui()
+    assert 'id="btn-new-smb"' in html
+    assert 'id="btn-new-nfs"' in html
+    assert 'function renderShares(body, data)' in html
+    assert 'function openShareForm(kind, op, row)' in html
+    assert "writesDryRun(built.subsystem, shareWrite.op" in html
+    assert "writesExecute(state.selectedInstance, built.subsystem, shareWrite.op" in html
+
+
+def test_nfs_share_rendered_by_singular_path_field_not_a_paths_array():
+    """A prior guess in this codebase assumed NFS shares had a `paths`
+    array (never live-verified at the time it was written) — the real
+    field, confirmed live 2026-07-20 against a real NFS share on .64, is
+    `path` (singular string). Regression guard against reintroducing the
+    wrong field name."""
+    html = _read_ui()
+    section = html.split('function renderShares(body, data)')[1].split('function renderSimpleTable')[0]
+    assert 's.path' in section
+    assert 's.paths' not in section
+
+
+def test_share_delete_confirms_against_real_name_or_path_not_the_opaque_id():
+    """An SMB/NFS share's id is an opaque integer TrueNAS assigns — typing
+    it to confirm a delete would be meaningless to an operator. The typed
+    confirmation must be against the share's real name (SMB) or path
+    (NFS), captured from the row at click-time."""
+    html = _read_ui()
+    assert "expected: row ? (kind === 'smb' ? row.name : row.path) : null" in html

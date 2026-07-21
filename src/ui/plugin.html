@@ -247,8 +247,61 @@
     </div>
   </section>
   <section class="tab" id="tab-shares">
-    <div class="subtab-hint">Solo lectura en F1 — CRUD llega en F3.</div>
+    <div class="toolbar">
+      <div class="subtab-hint" style="margin:0">SMB/NFS: crear/editar/borrar (F4c). iSCSI: solo lectura.</div>
+      <div class="row-actions">
+        <button class="btn secondary" id="btn-new-smb">+ Nuevo SMB</button>
+        <button class="btn secondary" id="btn-new-nfs">+ Nuevo NFS</button>
+      </div>
+    </div>
     <div id="shares-body" class="empty">Elegí una instancia arriba.</div>
+
+    <div class="card" id="share-write-card" hidden>
+      <h2 id="share-write-title">Nuevo share</h2>
+      <div class="field" id="share-write-name-field">
+        <label>Nombre</label>
+        <input type="text" id="shw-name">
+      </div>
+      <div class="field">
+        <label>Path</label>
+        <input type="text" id="shw-path" placeholder="/mnt/pool/dataset">
+      </div>
+      <div class="field">
+        <label>Comentario</label>
+        <input type="text" id="shw-comment">
+      </div>
+      <div class="checkbox-field">
+        <input type="checkbox" id="shw-enabled" checked>
+        <label for="shw-enabled" style="margin:0">habilitado</label>
+      </div>
+      <div class="checkbox-field">
+        <input type="checkbox" id="shw-readonly">
+        <label for="shw-readonly" id="shw-readonly-label" style="margin:0">solo lectura</label>
+      </div>
+      <div class="checkbox-field" id="share-write-browsable-field">
+        <input type="checkbox" id="shw-browsable" checked>
+        <label for="shw-browsable" style="margin:0">visible al navegar (browsable, SMB)</label>
+      </div>
+      <div class="field" id="share-write-hosts-field" hidden>
+        <label>Hosts permitidos (separados por coma, vacío = todos)</label>
+        <input type="text" id="shw-hosts" placeholder="192.168.1.10, backup.example.com">
+      </div>
+      <div class="field" id="share-write-networks-field" hidden>
+        <label>Redes permitidas CIDR (separadas por coma, vacío = todas)</label>
+        <input type="text" id="shw-networks" placeholder="192.168.1.0/24">
+      </div>
+      <div class="field" id="share-write-confirm-field" hidden>
+        <label>Escribí el nombre/path exacto para confirmar el borrado</label>
+        <input type="text" id="shw-confirm">
+      </div>
+      <div class="row-actions">
+        <button class="btn secondary" id="btn-share-preview">Vista previa</button>
+        <button class="btn" id="btn-share-confirm">Confirmar y ejecutar</button>
+        <button class="btn secondary" id="btn-share-cancel">Cancelar</button>
+      </div>
+      <pre id="share-write-preview" style="white-space:pre-wrap;font-size:12px;margin-top:10px"></pre>
+      <div id="share-write-result" style="font-size:13px;margin-top:6px"></div>
+    </div>
   </section>
   <section class="tab" id="tab-replication">
     <div class="subtab-hint">Solo lectura en F1 — crear tareas llega en F4.</div>
@@ -1203,6 +1256,69 @@
     body.innerHTML = html;
   }
 
+  function renderShares(body, data) {
+    body.className = '';
+    body.innerHTML =
+      '<h2 style="font-size:14px">SMB</h2><div id="shares-smb"></div>' +
+      '<h2 style="font-size:14px;margin-top:16px">NFS</h2><div id="shares-nfs"></div>' +
+      '<h2 style="font-size:14px;margin-top:16px">iSCSI targets</h2><div id="shares-iscsi"></div>';
+
+    var smbDiv = document.getElementById('shares-smb');
+    if (!data.smb || !data.smb.length) {
+      smbDiv.className = 'empty'; smbDiv.innerHTML = 'Sin shares SMB.';
+    } else {
+      var smbHtml = '<table><thead><tr><th>Nombre</th><th>Path</th><th>Habilitado</th><th></th></tr></thead><tbody>';
+      data.smb.forEach(function (s) {
+        smbHtml += '<tr><td>' + esc(s.name) + '</td><td>' + esc(s.path || '') + '</td>' +
+          '<td>' + (s.enabled ? 'sí' : 'no') + '</td>' +
+          '<td class="row-actions" data-kind="smb" data-id="' + esc(s.id) + '"></td></tr>';
+      });
+      smbHtml += '</tbody></table>';
+      smbDiv.innerHTML = smbHtml;
+    }
+
+    var nfsDiv = document.getElementById('shares-nfs');
+    if (!data.nfs || !data.nfs.length) {
+      nfsDiv.className = 'empty'; nfsDiv.innerHTML = 'Sin shares NFS.';
+    } else {
+      // NFS shares are identified by `path` (a single string) — a prior
+      // guess in this codebase assumed a `paths` array (never live-
+      // verified at the time); the real field, confirmed live 2026-07-20,
+      // is `path` singular.
+      var nfsHtml = '<table><thead><tr><th>Path</th><th>Habilitado</th><th></th></tr></thead><tbody>';
+      data.nfs.forEach(function (s) {
+        nfsHtml += '<tr><td>' + esc(s.path || '') + '</td>' +
+          '<td>' + (s.enabled ? 'sí' : 'no') + '</td>' +
+          '<td class="row-actions" data-kind="nfs" data-id="' + esc(s.id) + '"></td></tr>';
+      });
+      nfsHtml += '</tbody></table>';
+      nfsDiv.innerHTML = nfsHtml;
+    }
+
+    renderSimpleTable(document.getElementById('shares-iscsi'), data.iscsi_targets, [
+      ['Nombre', function (t) { return t.name || ''; }],
+      ['Alias', function (t) { return t.alias || ''; }],
+    ]);
+
+    var shareRows = { smb: data.smb || [], nfs: data.nfs || [] };
+    body.querySelectorAll('td.row-actions').forEach(function (cell) {
+      var kind = cell.dataset.kind;
+      var id = cell.dataset.id;
+      var row = shareRows[kind].find(function (s) { return String(s.id) === id; });
+      if (!row) return;
+      var editBtn = document.createElement('button');
+      editBtn.className = 'btn secondary';
+      editBtn.textContent = 'Editar';
+      editBtn.addEventListener('click', function () { openShareForm(kind, 'update', row); });
+      var delBtn = document.createElement('button');
+      delBtn.className = 'btn secondary';
+      delBtn.textContent = 'Borrar';
+      delBtn.addEventListener('click', function () { openShareForm(kind, 'delete', row); });
+      cell.appendChild(editBtn);
+      cell.appendChild(delBtn);
+    });
+  }
+
   function renderSimpleTable(body, items, columns) {
     body.className = '';
     if (!items || !items.length) { body.className = 'empty'; body.innerHTML = 'Sin datos.'; return; }
@@ -1294,26 +1410,7 @@
         ['Enabled', function (t) { return t.enabled ? 'sí' : 'no'; }],
       ]);
     },
-    shares: function (body, data) {
-      body.className = '';
-      body.innerHTML =
-        '<h2 style="font-size:14px">SMB</h2><div id="shares-smb"></div>' +
-        '<h2 style="font-size:14px;margin-top:16px">NFS</h2><div id="shares-nfs"></div>' +
-        '<h2 style="font-size:14px;margin-top:16px">iSCSI targets</h2><div id="shares-iscsi"></div>';
-      renderSimpleTable(document.getElementById('shares-smb'), data.smb, [
-        ['Nombre', function (s) { return s.name || s.path; }],
-        ['Path', function (s) { return s.path || ''; }],
-        ['Enabled', function (s) { return s.enabled ? 'sí' : 'no'; }],
-      ]);
-      renderSimpleTable(document.getElementById('shares-nfs'), data.nfs, [
-        ['Path(s)', function (s) { return (s.paths || []).join(', '); }],
-        ['Enabled', function (s) { return s.enabled ? 'sí' : 'no'; }],
-      ]);
-      renderSimpleTable(document.getElementById('shares-iscsi'), data.iscsi_targets, [
-        ['Nombre', function (t) { return t.name || ''; }],
-        ['Alias', function (t) { return t.alias || ''; }],
-      ]);
-    },
+    shares: renderShares,
     replication: function (body, items) {
       renderSimpleTable(body, items, [
         ['Nombre', function (r) { return r.name || r.id; }],
@@ -1612,6 +1709,140 @@
         if (res.data.status === 'ok') {
           closeResourceForm();
           invalidateAndRefetch('apps');
+        }
+      }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+        .finally(function () { btn.disabled = false; });
+  });
+
+  // -- SMB/NFS share write form (F4c: create/update/delete) ---------------
+  // A single form adapts its fields to `kind` ('smb'|'nfs') and `op`
+  // ('create'|'update'|'delete') — mirrors the dataset form's op-based
+  // field toggling. Delete's confirmation is against the share's real
+  // name (SMB) or path (NFS), never against its opaque numeric id, same
+  // rationale as datasets confirming against the dataset's own path.
+
+  var shareWrite = { kind: null, op: null, id: null, expected: null };
+
+  function openShareForm(kind, op, row) {
+    shareWrite = {
+      kind: kind, op: op,
+      id: row ? row.id : null,
+      expected: row ? (kind === 'smb' ? row.name : row.path) : null,
+    };
+    var card = document.getElementById('share-write-card');
+    card.hidden = false;
+    var kindLabel = kind === 'smb' ? 'SMB' : 'NFS';
+    document.getElementById('share-write-title').textContent =
+      op === 'create' ? 'Nuevo share ' + kindLabel :
+      (op === 'update' ? 'Editar: ' : 'Borrar: ') + (shareWrite.expected || '');
+
+    document.getElementById('share-write-name-field').hidden = kind !== 'smb';
+    document.getElementById('share-write-browsable-field').hidden = kind !== 'smb';
+    document.getElementById('share-write-hosts-field').hidden = kind !== 'nfs';
+    document.getElementById('share-write-networks-field').hidden = kind !== 'nfs';
+    document.getElementById('share-write-confirm-field').hidden = op !== 'delete';
+    document.getElementById('shw-readonly-label').textContent =
+      kind === 'smb' ? 'solo lectura' : 'solo lectura (ro)';
+
+    document.getElementById('shw-name').value = row ? (row.name || '') : '';
+    document.getElementById('shw-path').value = row ? (row.path || '') : '';
+    document.getElementById('shw-comment').value = row ? (row.comment || '') : '';
+    document.getElementById('shw-enabled').checked = row ? !!row.enabled : true;
+    document.getElementById('shw-readonly').checked = row ? !!(row.readonly || row.ro) : false;
+    document.getElementById('shw-browsable').checked = row ? row.browsable !== false : true;
+    document.getElementById('shw-hosts').value = row && row.hosts ? row.hosts.join(', ') : '';
+    document.getElementById('shw-networks').value = row && row.networks ? row.networks.join(', ') : '';
+    document.getElementById('shw-confirm').value = '';
+    document.getElementById('share-write-preview').textContent = '';
+    document.getElementById('share-write-result').textContent = '';
+    // Same rationale as the dataset form: only 'delete' needs a typed
+    // confirmation before its confirm button is usable.
+    document.getElementById('btn-share-confirm').disabled = (op === 'delete');
+  }
+
+  function closeShareForm() {
+    document.getElementById('share-write-card').hidden = true;
+    shareWrite = { kind: null, op: null, id: null, expected: null };
+  }
+
+  function splitCsv(raw) {
+    return raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  function shareFields() {
+    var fields = {
+      path: document.getElementById('shw-path').value.trim(),
+      comment: document.getElementById('shw-comment').value.trim(),
+      enabled: document.getElementById('shw-enabled').checked,
+    };
+    if (shareWrite.kind === 'smb') {
+      fields.name = document.getElementById('shw-name').value.trim();
+      fields.readonly = document.getElementById('shw-readonly').checked;
+      fields.browsable = document.getElementById('shw-browsable').checked;
+    } else {
+      fields.ro = document.getElementById('shw-readonly').checked;
+      fields.hosts = splitCsv(document.getElementById('shw-hosts').value);
+      fields.networks = splitCsv(document.getElementById('shw-networks').value);
+    }
+    return fields;
+  }
+
+  function sharePayload() {
+    var subsystem = shareWrite.kind === 'smb' ? 'smb_shares' : 'nfs_shares';
+    if (shareWrite.op === 'delete') {
+      var confirmField = document.getElementById('shw-confirm').value.trim();
+      var payload = { share_id: shareWrite.id, confirm_name: confirmField };
+      payload[shareWrite.kind === 'smb' ? 'expected_name' : 'expected_path'] = shareWrite.expected;
+      return { subsystem: subsystem, payload: payload };
+    }
+    if (shareWrite.op === 'create') {
+      return { subsystem: subsystem, payload: { fields: shareFields() } };
+    }
+    return { subsystem: subsystem, payload: { share_id: shareWrite.id, fields: shareFields() } };
+  }
+
+  document.getElementById('btn-new-smb').addEventListener('click', function () {
+    openShareForm('smb', 'create', null);
+  });
+  document.getElementById('btn-new-nfs').addEventListener('click', function () {
+    openShareForm('nfs', 'create', null);
+  });
+  document.getElementById('btn-share-cancel').addEventListener('click', closeShareForm);
+  document.getElementById('shw-confirm').addEventListener('input', function () {
+    document.getElementById('btn-share-confirm').disabled = this.value.trim() !== shareWrite.expected;
+  });
+  document.getElementById('btn-share-preview').addEventListener('click', function () {
+    var btn = this;
+    var out = document.getElementById('share-write-preview');
+    var built = sharePayload();
+    btn.disabled = true;
+    out.textContent = 'Consultando…';
+    writesDryRun(built.subsystem, shareWrite.op, built.payload).then(function (res) {
+      if (res.status !== 200) {
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+        return;
+      }
+      out.textContent = res.data.method + '(' + JSON.stringify(res.data.params) + ')';
+    }).catch(function (e) { out.textContent = networkErrorMessage(e); })
+      .finally(function () { btn.disabled = false; });
+  });
+  document.getElementById('btn-share-confirm').addEventListener('click', function () {
+    // Same double-submit guard as every other write confirm.
+    var btn = this;
+    var out = document.getElementById('share-write-result');
+    var built = sharePayload();
+    btn.disabled = true;
+    out.textContent = 'Ejecutando…';
+    writesExecute(state.selectedInstance, built.subsystem, shareWrite.op, built.payload)
+      .then(function (res) {
+        if (res.status >= 400) {
+          out.textContent = 'Error: ' + ((res.data && res.data.error) || 'desconocido');
+          return;
+        }
+        out.textContent = 'Resultado: ' + res.data.status;
+        if (res.data.status === 'ok') {
+          closeShareForm();
+          invalidateAndRefetch('shares');
         }
       }).catch(function (e) { out.textContent = networkErrorMessage(e); })
         .finally(function () { btn.disabled = false; });

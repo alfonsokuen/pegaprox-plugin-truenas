@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.9.0] - 2026-07-20 (F4c: real SMB/NFS share create/update/delete)
+
+Last item of the 4-item batch (charts, F4c, F5, F6 — all done). Schemas
+verified live against `.64` before writing any code, same discipline as
+every other write phase — but this one touches shares in ACTIVE use by
+real clients (a real "nextcloud" SMB share, a real "PBS_NFS" NFS share
+backing Proxmox Backup Server), so no write was executed against either;
+only `core.get_methods` schemas were inspected.
+
+- `sharing.smb.create/update/delete` and `sharing.nfs.create/update/
+  delete` are all synchronous (`job: False`, confirmed live) — no job_id
+  handling needed.
+- **Deliberately scoped OUT: iSCSI CRUD.** An iSCSI "share" is a 3-way
+  join (target + extent + targetextent); building that properly is a
+  meaningfully bigger task than SMB/NFS create/update/delete, which covers
+  the actual "share a folder without opening TrueNAS" ask. iSCSI stays
+  read-only.
+- Delete's typed-confirmation guard has one real difference from
+  datasets: a dataset's `id` IS a human-readable path, so it confirms
+  against itself. An SMB/NFS share's `id` is an opaque integer — the
+  builder has no `conn` to look up the real name/path, so the caller (the
+  UI, which already has the row) supplies `expected_name`/`expected_path`
+  alongside the typed `confirm_name`; the builder only compares the two
+  values it's given, never trusts the caller to have gotten
+  `expected_name` right.
+- **Bug found and fixed while verifying live, unrelated to the write
+  path**: this plugin's read-only NFS rendering assumed a `paths` array
+  field (`s.paths`) — a guess from F1 that was never live-verified (no
+  real NFS share existed to check against at the time). The real field,
+  confirmed live against the actual "PBS_NFS" share, is `path` (singular
+  string). Fixed alongside the new create/edit/delete UI.
+- New "+ Nuevo SMB"/"+ Nuevo NFS" buttons and per-row Editar/Borrar,
+  through the same dry-run-preview-then-confirm flow as every other write
+  in this plugin.
+- 352 tests (up from 332).
+
 ## [0.8.0] - 2026-07-20 (Overview telemetry: CPU/memory/network sparklines)
 
 Second-to-last item of the 4-item batch. What the operator asked for after
