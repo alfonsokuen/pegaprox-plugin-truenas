@@ -61,6 +61,23 @@ def test_settings_form_exposes_rw_key_and_tls_server_name():
     assert "document.getElementById('f-tls-name').value" in html
 
 
+def test_pools_tab_renders_a_status_card_grid_not_a_plain_table():
+    """Live feedback (2026-07-20): the Pools & Discos tab was a bare
+    3-column table; the operator wanted a per-pool status grid matching
+    TrueNAS's own native dashboard (name header + Pool Status/Used Space/
+    Disks with Errors/Last Scrub rows with check/warning icons). Verifies
+    the helpers this relies on are present: poolDiskSummary() walks ALL
+    topology vdev groups (not just 'data') for leaf-disk error stats,
+    since a faulted disk can sit in cache/log/spare/special vdevs too."""
+    html = _read_ui()
+    assert 'function poolDiskSummary(pool)' in html
+    assert "['data', 'cache', 'dedup', 'log', 'spare', 'special']" in html
+    assert 'function formatBytes(n)' in html
+    assert "class=\"pool-grid\"" in html
+    assert "poolRow(!!p.healthy, 'Pool Status'" in html
+    assert "poolRow(disks.errored === 0, 'Disks with Errors'" in html
+
+
 def test_overview_is_the_default_active_tab_not_settings():
     """Live feedback (2026-07-20): the plugin always opened on Settings —
     dating back to F0 when Settings was the only tab with anything to show.

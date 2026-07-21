@@ -9,15 +9,20 @@
      Tailwind build: --color-{dark,card,border,primary,secondary}-rgb) so the
      plugin reads as part of the panel, not a foreign iframe. --accent is
      PegaProx's actual brand color (Proxmox orange, #e57000), not a generic
-     dashboard blue; --ok mirrors their secondary green (#238636). */
+     dashboard blue; --ok mirrors their secondary green (#238636).
+
+     Dark-only, deliberately: PegaProx passes theme=cloud to every plugin
+     iframe embedded under its "Cloud" section regardless of the user's own
+     dark/light color preference — that query param is a LAYOUT/section
+     identifier, not a color-scheme signal (confirmed live: a user on
+     PegaProx's dark theme saw this plugin render light while every other
+     plugin around it stayed dark). Do not reintroduce a
+     [data-theme="cloud"] light override on the strength of that param
+     alone — it doesn't mean what its name suggests. */
   :root {
     --bg: #0f1419; --panel: #161b22; --border: #30363d; --text: #e6edf3;
     --muted: #8b949e; --accent: #e57000; --ok: #238636; --warn: #d29922; --err: #f85149;
     --radius: 8px;
-  }
-  [data-theme="cloud"] {
-    --bg: #f4f6f8; --panel: #ffffff; --border: #dde3ea; --text: #1b2430;
-    --muted: #5c6b7a; --accent: #c2570a; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
   }
   * { box-sizing: border-box; }
   :root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
@@ -114,6 +119,14 @@
   .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .checkbox-field input { width: auto; }
   a.link { color: var(--accent); }
+  .pool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .pool-card h2 { font-size: 14px; margin: 0 0 10px; }
+  .pool-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 4px 0; }
+  .pool-row .row-icon { width: 14px; height: 14px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+  .pool-row.ok .row-icon { color: var(--ok); }
+  .pool-row.warn .row-icon { color: var(--warn); }
+  .pool-row-label { color: var(--muted); }
+  .pool-row-value { margin-left: auto; font-weight: 500; text-align: right; }
   .bento { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .bento .card { border-top: 2px solid var(--border); transition: border-color 200ms var(--ease-out); }
   .bento .card.stat-ok { border-top-color: var(--ok); }
@@ -649,7 +662,60 @@
     pools: '<svg class="card-icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
     alerts: '<svg class="card-icon" viewBox="0 0 24 24"><path d="M12 3a5 5 0 0 0-5 5v3.5c0 .8-.3 1.5-.8 2.1L5 16h14l-1.2-2.4a3.5 3.5 0 0 1-.8-2.1V8a5 5 0 0 0-5-5z"/><path d="M9.5 19a2.5 2.5 0 0 0 5 0"/></svg>',
     version: '<svg class="card-icon" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z"/></svg>',
+    check: '<svg class="row-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5.5"/></svg>',
+    warn: '<svg class="row-icon" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>',
   };
+
+  // -- byte formatting + ZFS topology helpers (Storage grid) --------------
+
+  function formatBytes(n) {
+    if (n === null || n === undefined || isNaN(n)) return '?';
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    var v = n, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(i === 0 ? 0 : (v < 10 ? 2 : 1)) + ' ' + units[i];
+  }
+
+  function walkVdevDisks(vdev, out) {
+    if (!vdev) return;
+    if (vdev.type === 'DISK') { out.push(vdev); return; }
+    (vdev.children || []).forEach(function (c) { walkVdevDisks(c, out); });
+  }
+
+  // ZFS reports read/write/checksum errors per LEAF disk inside topology,
+  // not as a flat count on the pool — pool.query's own docs call this out
+  // as attrs passthrough, so this walks the same vdev groups zpool status
+  // does (data/cache/dedup/log/spare/special) rather than assuming "data"
+  // is the only one that can hold a faulted disk.
+  function poolDiskSummary(pool) {
+    var topo = pool.topology || {};
+    var leaves = [];
+    ['data', 'cache', 'dedup', 'log', 'spare', 'special'].forEach(function (group) {
+      (topo[group] || []).forEach(function (vdev) { walkVdevDisks(vdev, leaves); });
+    });
+    var errored = leaves.filter(function (d) {
+      var s = d.stats || {};
+      return d.status !== 'ONLINE' ||
+        (s.read_errors || 0) > 0 || (s.write_errors || 0) > 0 || (s.checksum_errors || 0) > 0;
+    }).length;
+    return { errored: errored, total: leaves.length };
+  }
+
+  function lastScrubText(scan) {
+    if (!scan || !scan.function) return 'nunca';
+    if (scan.state === 'SCANNING') {
+      return scan.function.toLowerCase() + ' en curso (' + (scan.percentage || 0).toFixed(0) + '%)';
+    }
+    var when = scan.end_time && scan.end_time['$date'] ? new Date(scan.end_time['$date']) : null;
+    var label = scan.state === 'FINISHED' ? 'completado' : (scan.state || '?').toLowerCase();
+    return scan.function.toLowerCase() + ' ' + label + (when ? ' — ' + when.toLocaleDateString() : '');
+  }
+
+  function poolRow(ok, label, value) {
+    return '<div class="pool-row ' + (ok ? 'ok' : 'warn') + '">' + ICONS[ok ? 'check' : 'warn'] +
+      '<span class="pool-row-label">' + esc(label) + '</span>' +
+      '<span class="pool-row-value">' + esc(value) + '</span></div>';
+  }
 
   function renderOverview(body, sysRes, poolsRes) {
     body.className = '';
@@ -714,13 +780,23 @@
     var pools = data.pools || [], temps = data.temperatures || {};
     if (!pools.length) { body.className = 'empty'; body.innerHTML = 'Sin pools.'; return; }
     var html = updatedAtHtml();
-    html += '<table><thead><tr><th>Pool</th><th>Estado</th><th>Scan</th></tr></thead><tbody>';
+    html += '<div class="pool-grid">';
     pools.forEach(function (p) {
-      var scan = p.scan && p.scan.state === 'SCANNING'
-        ? (p.scan.function + ' ' + (p.scan.percentage || 0).toFixed(1) + '%') : '—';
-      html += '<tr><td>' + esc(p.name) + '</td><td>' + badge(p.status || '?') + '</td><td>' + esc(scan) + '</td></tr>';
+      var disks = poolDiskSummary(p);
+      var usedPct = p.size ? (p.allocated / p.size * 100) : 0;
+      html += '<div class="card pool-card">';
+      html += '<h2>' + esc(p.name) + '</h2>';
+      html += poolRow(!!p.healthy, 'Pool Status', p.status || '?');
+      html += poolRow(usedPct < 80, 'Used Space',
+        formatBytes(p.allocated) + ' of ' + formatBytes(p.size) + ' (' + usedPct.toFixed(1) + '%)');
+      html += poolRow(disks.errored === 0, 'Disks with Errors', disks.errored + ' of ' + disks.total);
+      html += poolRow(!p.scan || p.scan.state !== 'SCANNING', 'Last Scrub', lastScrubText(p.scan));
+      if (p.scan && p.scan.state === 'SCANNING') {
+        html += '<div class="progress"><div style="width:' + (p.scan.percentage || 0) + '%"></div></div>';
+      }
+      html += '</div>';
     });
-    html += '</tbody></table>';
+    html += '</div>';
     if (data.disks_error) {
       html += '<div class="subtab-hint">No se pudieron leer los discos: ' + esc(data.disks_error) + '</div>';
     }
