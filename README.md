@@ -237,10 +237,14 @@ top, see above.)
   back as a TrueNAS job is reported as `pending` with a re-check path, not
   actively polled to completion.
 - No `check_cluster_access` per-client RBAC — admin-only gate until a second
-  real client is on-boarded.
-- No connection to any instance besides the operator's own `.64` yet —
-  onboarding a second real client requires explicit operator confirmation in
-  a separate session, same review discipline as every write phase above.
+  real client is on-boarded (all instances so far belong to the operator's
+  own `idkmanager` tenant, not a second real client).
+- Two instances configured today, both `idkmanager`: `datos-64` (general
+  SMB/NFS/iSCSI storage) and `nvmeof-253` (the NVMe-oF pool backing VM
+  block storage, added 2026-07-21 — `svc-pegaprox-ro`/`READONLY_ADMIN`,
+  read-only). A second real *client* tenant still requires explicit
+  operator confirmation in a separate session, same review discipline as
+  every write phase above.
 - `smart.test.results` (SMART data) was dropped, not deferred — this
   TrueNAS version has no `smart.*` method namespace at all.
 
