@@ -1,5 +1,136 @@
 # Changelog
 
+## [0.14.0] - 2026-07-21 (background poller + edge-triggered notifications) — **poller SHIPPED DISABLED, see incident below**
+
+Fourth and largest item of the config-audit backlog: the plugin had zero
+proactive alerting — the only way to notice a problem was to have the
+dashboard open. `poll.{fast_s,slow_s,cold_s}` had been validated/persisted
+since F0 with nothing ever consuming it ("F1 will consume" — this is F1).
+
+**Live incident, same day, first real deploy**: within two poll cycles on
+CT119, both configured TrueNAS instances flipped to "unreachable" and
+stayed that way. Root-caused with `arquitecto`'s review (not guessed): a
+real, pre-existing latent race in `_get_authenticated_connection`
+(`routes/api.py`) — check `is_authenticated`, then call `login()`, with no
+lock across the two steps. Before the poller existed, the only caller was
+sporadic browser-triggered access, so the window rarely closed; the
+poller's fixed 60s-per-instance cadence made it land, reliably, while
+`ws_client.py`'s own `_background_reconnect` was ALSO mid-relogin on the
+same cached client after an unexpected drop. Both sides observed
+`is_authenticated == False` and both called `login()` — TrueNAS's own auth
+state machine rejects a SECOND `auth.login_with_api_key` on the same
+session outright (not a bad key: "unexpected authenticator run state"),
+which `_do_login` (wrongly, for this case) treats as a revoked key and
+poisons `needs_auth` **permanently** — nothing ever clears it short of a
+plugin restart, which is why both instances stayed down instead of
+self-healing.
+
+- **Fix**: `TrueNASWSClient.ensure_logged_in(api_key)` (`core/ws_client.py`)
+  — atomic check-then-login under a new `_login_lock`. Critically, per
+  `arquitecto`'s review, a lock around only the EXTERNAL caller's
+  check-then-login is insufficient by itself: `_relogin_and_resubscribe`
+  must go through the exact same guarded path (not call `_do_login`
+  directly), or a sequential double-login (poller logs in first, the
+  reconnect worker's unconditional relogin runs right after) hits the
+  identical rejection, just serialized instead of concurrent. Lock
+  ordering verified by inspection (`_login_lock` always acquired before
+  `_connect_lock`, never the reverse, in every path) — no deadlock risk.
+  `routes/api.py`'s `_get_authenticated_connection`/
+  `_get_rw_authenticated_connection` now call `ensure_logged_in` instead
+  of the old manual check.
+- **5 new mandatory red→green concurrency tests** (`test_ws_client.py`):
+  a state-machine-aware `FakeTransport` scenario reproducing the exact
+  incident — Scenario A (concurrent: a caller races `_background_reconnect`
+  mid-relogin, must block on the lock, not fire a competing login),
+  Scenario B (sequential: the specific case an insufficient fix gets
+  wrong), a stress variant (20 threads), and two direct unit checks.
+  Verified genuinely red first: reverted the fix (`git stash`), confirmed
+  4 of 5 tests fail meaningfully (not just import errors), restored, all
+  green — the tests weren't just written to pass.
+- **NO-GO on re-enabling the poller** (arquitecto's explicit call, not
+  overridden): the auth race explains why both instances got PERMANENTLY
+  stuck, but does **not** explain why the socket dropped every ~60s in
+  the first place — the poller only reads, and reading doesn't drop a
+  socket. Disabling the poller entirely made the drops stop, which is
+  real evidence but not yet a diagnosed cause (leading hypothesis: an
+  idle/activity-adjacent timeout somewhere in the network path resonating
+  with the exact poll cadence — unconfirmed, needs either TrueNAS-side
+  `middlewared.log` access this session doesn't have, or the operator's
+  own knowledge of the path). `routes_api.start_poller()` is commented out
+  in `__init__.py` with a dated note explaining why — the poller code,
+  the alert engine, the webhook channel, and the Settings UI all ship in
+  this release, built and tested, just not started by default until the
+  drop cause is confirmed and a canary rollout (one instance first, ≥30min
+  observed) confirms real stability.
+- Also fixed while investigating: `tests/test_register.py`'s
+  `test_register_wires_all_routes` called the REAL `register()` against
+  the REAL `PLUGIN_DIR` — harmless when no `config.json` exists there, but
+  a developer's local checkout can have one (gitignored, used for manual
+  live-testing against the real instance) and this test's poller start
+  then made REAL network calls to REAL production directly from a plain
+  `pytest` run. Confirmed this actually happened (found a real,
+  credentialed `alerts_state.json` sitting in the repo root). Fixed by
+  repointing `PLUGIN_DIR` at a `tmp_path` for this test. Also added
+  `secret.key`/`alerts_state.json` to `.gitignore` — neither had been
+  there before (new file types this release introduces), and `secret.key`
+  in particular must never be committed.
+
+- **`core/poller.py`**: a single daemon thread, started once from
+  `register(app)`, with the same guard-flag pattern `ws_client.py`'s own
+  `_background_reconnect` already uses — not architecture foreign to this
+  plugin, an extension of a pattern it already runs. Cadence =
+  `poll.slow_s` (re-read fresh every cycle, so changing it from Settings
+  takes effect on the next tick without a restart). Reuses `fetch_fleet`
+  (the same concurrent, per-instance-isolated fetch the Fleet tab's own
+  route already relies on) rather than a second parallel fetch path.
+  Every cycle is wrapped in its own try/except — a crash logs loudly,
+  marks `status()` as not-ok, and the loop continues on schedule; it never
+  dies silently, exactly the failure mode this whole feature exists to
+  catch for TrueNAS itself. `poller/status` route + a Settings-tab badge
+  ("poller vivo hace Xs" / the last error) make that observable instead
+  of a backend-only fact with no UI trace.
+- **`core/alerts.py`**: edge-triggered evaluator, not a periodic re-check.
+  Detects (v1, deliberately short): pool capacity vs F2's warn/crit
+  thresholds (per-instance override respected), instance reachability,
+  and a relay of TrueNAS's own `alert.list` (deduped by TrueNAS's own
+  alert id — free detection of SMART/replication/scrub failures, no
+  reinvented logic). Anti-flood built in from the design, not patched on
+  after (the lesson from the idkpublicitaria remediationBridge flooding
+  incident): fires only on a genuine level TRANSITION; hysteresis clears
+  a warn/crit condition only 5 points below its warn threshold, not the
+  instant it dips under it, so a value oscillating at the boundary
+  doesn't flap a notification every poll; a sustained non-ok condition
+  still re-notifies after 24h so a week-long CRIT doesn't go permanently
+  silent; a global cap of 10 notifications/hour collapses any excess into
+  one "N alerts suppressed" summary instead of silently dropping them.
+  State persists to `alerts_state.json` so a restart never re-floods
+  every currently-true condition as brand new.
+- **`core/notify.py`**: a generic webhook channel (stdlib `urllib`, no new
+  dependency for one JSON POST). `notify.webhook_url` joins
+  `api_key_ro`/`rw` in the masked-secret convention (webhook URLs commonly
+  embed a bearer token) — cifrado at rest is NOT yet extended to it (that
+  would be a natural F3 follow-up, not attempted here).
+- **Mandatory red test** (testing.md): a 7-poll flapping series
+  oscillating around the warn threshold produces exactly 2 notifications
+  (the rise and the eventual recovery), not one per oscillation — proving
+  hysteresis actually suppresses the flood rather than just existing in
+  code un-exercised.
+- Verified: 439 tests green (48 new). Visually verified both the healthy
+  and the failed poller-status badge state against a mock — the failed
+  state initially rendered in the same gray as everything else (a real,
+  if small, bug: `.err` in this codebase is always a scoped rule like
+  `#test-result.err`, never a bare generic class — my badge needed its
+  own `#poller-status-badge.err` rule, which was missing).
+- **Caught live on the first CT119 deploy, not by any unit test**: the
+  poller passed `conn_manager.get_connection` straight to `fetch_fleet`
+  instead of `routes/api.py`'s `_get_authenticated_connection` (which also
+  calls `.login()`) — every RPC failed with `[ENOTAUTHENTICATED]`, visible
+  within seconds in `journalctl`. `poller.start()`/`run_one_cycle()` now
+  take a `get_conn` callable rather than the raw `ConnectionManager`, so
+  the poller authenticates exactly like every browser-triggered read and
+  shares the same logged-in sockets rather than risking a second,
+  differently-behaved connection path.
+
 ## [0.13.0] - 2026-07-21 (encrypt api_key_ro/api_key_rw at rest)
 
 Second item of the config-audit backlog: `config.json` held TrueNAS API

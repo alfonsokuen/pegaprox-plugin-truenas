@@ -45,8 +45,9 @@ from pegaprox.utils.auth import load_users
 from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
 
+from core import poller
 from core.conn_manager import ConnectionManager
-from core.errors import TrueNASAuthError, TrueNASError
+from core.errors import TrueNASError
 from core.subsystem import ConfirmationRequired, safe_call
 import subsystems.apps_vms as apps_vms_mod
 import subsystems.datasets as datasets_mod
@@ -80,6 +81,7 @@ log = logging.getLogger(f'plugin.{PLUGIN_ID}')
 
 CONFIG_PATH = None   # set by init()
 UI_HTML_PATH = None  # set by init()
+STATE_PATH = None    # set by init() — F4a alert-engine persisted state
 
 conn_manager = ConnectionManager()
 
@@ -89,9 +91,24 @@ def init(plugin_dir):
     from ``__init__.py``'s ``register()`` (and directly by tests with a
     scratch dir) — kept separate from import time so nothing touches the
     filesystem just by importing this module."""
-    global CONFIG_PATH, UI_HTML_PATH
+    global CONFIG_PATH, UI_HTML_PATH, STATE_PATH
     CONFIG_PATH = os.path.join(plugin_dir, 'config.json')
     UI_HTML_PATH = os.path.join(plugin_dir, 'src', 'ui', 'plugin.html')
+    STATE_PATH = os.path.join(plugin_dir, 'alerts_state.json')
+
+
+def start_poller():
+    """Launch the F4a background poller — separate from ``init()`` so
+    tests can wire CONFIG_PATH/STATE_PATH against a scratch dir WITHOUT
+    also spinning up a live thread that fans out over (test) instances on
+    a timer. Called once from ``__init__.py``'s ``register()``, after
+    ``init()``.
+
+    Passes ``_get_authenticated_connection`` itself (not the raw
+    ``conn_manager``) — the poller must log in exactly like every other
+    read route does, or every RPC fails with ENOTAUTHENTICATED against an
+    unauthenticated-but-connected client."""
+    poller.start(CONFIG_PATH, STATE_PATH, _get_authenticated_connection)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +159,18 @@ def config_handler():
         'instances_by_client': config_store.group_by_client(masked),
         'poll': cfg['poll'],
         'thresholds': cfg['thresholds'],
+        'notify': config_store.mask_notify(cfg['notify']),
     })
+
+
+def poller_status_handler():
+    """Backs the Settings tab's poller-liveness badge — read-only, no admin
+    gate needed beyond the plugin's normal view permission since it exposes
+    no secret, just "is the background poller alive and when did it last
+    run" (the anti-silent-failure observability the poller itself needs)."""
+    if (err := _require(PERM_VIEW)):
+        return err
+    return jsonify(poller.status())
 
 
 def config_save_handler():
@@ -176,7 +204,11 @@ def config_save_handler():
     if err:
         return jsonify({'error': err}), 400
 
-    cfg = {'instances': instances, 'poll': poll, 'thresholds': thresholds}
+    notify, err = config_store.validate_notify(body.get('notify'), old_cfg.get('notify'))
+    if err:
+        return jsonify({'error': err}), 400
+
+    cfg = {'instances': instances, 'poll': poll, 'thresholds': thresholds, 'notify': notify}
     try:
         config_store.save_config(CONFIG_PATH, cfg)
     except OSError as e:
@@ -293,20 +325,22 @@ def _get_authenticated_connection(inst):
     (brief §3: minimum privilege in runtime, regardless of the instance's
     ``readonly`` flag, which gates writers, not this).
 
-    Fails fast on ``conn.needs_auth`` — set when the appliance already
-    rejected this same key on a previous relogin attempt (bad/revoked key).
-    Without this check, every request/poll would retry the identical login
-    call against a key already known to be bad, hammering the appliance
-    with failed-auth attempts for no benefit (the error would still reach
-    the user either way — this just stops repeating a call whose answer is
-    already known)."""
+    Goes through ``conn.ensure_logged_in`` — an atomic check-then-login,
+    NOT the manual ``if not conn.is_authenticated: conn.login(...)`` this
+    used to be. That manual version was a real, live-incident-causing race
+    (2026-07-21): with the F4a background poller calling this on a fixed
+    60s cadence for every instance, it could land while
+    ``TrueNASWSClient._background_reconnect`` was ALSO mid-relogin on the
+    same client after an unexpected drop — both threads observing
+    ``is_authenticated`` as False and both calling ``login()`` sent a
+    second ``auth.login_with_api_key`` on the same session, which
+    TrueNAS's own auth state machine rejects outright (not a bad key —
+    "unexpected authenticator run state"), permanently poisoning
+    ``needs_auth`` and marking the instance unreachable until the plugin
+    restarted. ``ensure_logged_in`` centralizes the guard where the
+    session state actually lives (see its docstring in ws_client.py)."""
     conn = conn_manager.get_connection(inst)
-    if conn.needs_auth:
-        raise TrueNASAuthError('auth.login_with_api_key', {
-            'message': 'API key was rejected on a previous attempt — '
-                       'check/rotate it in Settings before retrying'})
-    if not conn.is_authenticated:
-        conn.login(inst['api_key_ro'])
+    conn.ensure_logged_in(inst['api_key_ro'])
     return conn
 
 
@@ -1004,14 +1038,10 @@ def _resolve_writable_instance(instance_id):
 def _get_rw_authenticated_connection(inst):
     """Mirrors ``_get_authenticated_connection`` but against the SEPARATE
     RW-privileged connection (``conn_manager.get_rw_connection``) — writes
-    must never upgrade the shared read connection's privilege level."""
+    must never upgrade the shared read connection's privilege level.
+    Same ``ensure_logged_in`` atomic guard — see its docstring."""
     conn = conn_manager.get_rw_connection(inst)
-    if conn.needs_auth:
-        raise TrueNASAuthError('auth.login_with_api_key', {
-            'message': 'RW API key was rejected on a previous attempt — '
-                       'check/rotate it in Settings before retrying'})
-    if not conn.is_authenticated:
-        conn.login(inst['api_key_rw'])
+    conn.ensure_logged_in(inst['api_key_rw'])
     return conn
 
 
@@ -1198,6 +1228,7 @@ ROUTES = {
     'data_protection': data_protection_handler,
     'telemetry': telemetry_handler,
     'fleet': fleet_handler,
+    'poller/status': poller_status_handler,
     'writes/dry-run': writes_dry_run_handler,
     'writes/execute': writes_execute_handler,
 }

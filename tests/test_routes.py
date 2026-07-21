@@ -95,6 +95,42 @@ def test_config_handler_includes_thresholds(plugin, tmp_plugin_dir, monkeypatch)
     assert payload['thresholds'] == config_store.DEFAULT_THRESHOLDS
 
 
+def test_config_handler_includes_masked_notify(plugin, tmp_plugin_dir, monkeypatch):
+    config_store.save_config(routes_api.CONFIG_PATH, {
+        'instances': [], 'poll': config_store.DEFAULT_POLL,
+        'thresholds': config_store.DEFAULT_THRESHOLDS,
+        'notify': {'webhook_url': 'https://example.invalid/hook'},
+    })
+    _, payload = routes_api.config_handler()
+    assert payload['notify']['webhook_url'] == '***'
+
+
+def test_config_save_handler_persists_notify_webhook_url(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instances': [], 'poll': {}, 'thresholds': {},
+        'notify': {'webhook_url': 'https://example.invalid/hook'},
+    })
+    routes_api.config_save_handler()
+    saved = config_store.load_config(routes_api.CONFIG_PATH)
+    assert saved['notify']['webhook_url'] == 'https://example.invalid/hook'
+
+
+def test_config_save_handler_rejects_invalid_webhook_url(plugin, tmp_plugin_dir, monkeypatch):
+    monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
+        'instances': [], 'poll': {}, 'thresholds': {},
+        'notify': {'webhook_url': 'not-a-url'},
+    })
+    resp, status = routes_api.config_save_handler()
+    assert status == 400
+
+
+def test_poller_status_handler_returns_the_poller_module_status(plugin, tmp_plugin_dir, monkeypatch):
+    from core import poller
+    monkeypatch.setattr(poller, 'status', lambda: {'last_run': 123.0, 'ok': True, 'error': None})
+    _, payload = routes_api.poller_status_handler()
+    assert payload == {'last_run': 123.0, 'ok': True, 'error': None}
+
+
 def test_config_save_handler_persists_custom_thresholds(plugin, tmp_plugin_dir, monkeypatch):
     monkeypatch.setattr(routes_api.request, 'get_json', lambda silent=False: {
         'instances': [], 'poll': {}, 'thresholds': {'warn_pct': 70, 'crit_pct': 85},

@@ -117,6 +117,7 @@
   #test-result { margin-top: 10px; font-size: 13px; }
   #test-result.ok { color: var(--ok); }
   #test-result.err { color: var(--err); }
+  #poller-status-badge.err { color: var(--err); }
   .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .checkbox-field input { width: auto; }
   a.link { color: var(--accent); }
@@ -405,6 +406,23 @@
         </div>
       </div>
       <div id="thresholds-result"></div>
+    </div>
+
+    <div class="card" id="notify-card">
+      <h2 style="margin:0 0 8px;font-size:15px;">Notificaciones</h2>
+      <div class="subtab-hint" style="margin-bottom:8px">
+        Webhook genérico: recibe un POST con JSON cuando una instancia/pool cambia de estado
+        (capacidad, alcanzabilidad, alertas de TrueNAS). Antiflood incorporado — avisa en
+        transiciones reales, no en cada poll.
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:2"><label>Webhook URL</label><input type="text" id="f-webhook-url" placeholder="https://…"></div>
+        <div class="field" style="justify-content:flex-end;display:flex;align-items:flex-end">
+          <button class="btn secondary" id="btn-save-notify">Guardar notificaciones</button>
+        </div>
+      </div>
+      <div id="notify-result"></div>
+      <div class="subtab-hint" id="poller-status-badge" style="margin-top:10px"></div>
     </div>
 
     <div class="toolbar">
@@ -757,6 +775,9 @@
       var thresholds = res.data.thresholds || DEFAULT_THRESHOLDS;
       document.getElementById('f-thresh-warn').value = thresholds.warn_pct;
       document.getElementById('f-thresh-crit').value = thresholds.crit_pct;
+      var notifyCfg = res.data.notify || {};
+      document.getElementById('f-webhook-url').value = notifyCfg.webhook_url || '';
+      refreshPollerStatusBadge();
 
       // Building <option> elements never fires 'change' — the browser
       // auto-picks the first one once instances exist, but state.
@@ -808,6 +829,60 @@
         out.className = 'ok';
         out.textContent = 'Umbrales guardados.';
         loadConfig().then(function () { refreshTab(activeTabName()); });
+      } else {
+        out.className = 'err';
+        out.textContent = 'Error: ' + ((res.data && res.data.error) || 'no se pudo guardar');
+      }
+    }).catch(function (e) {
+      btn.disabled = false;
+      out.className = 'err';
+      out.textContent = 'Error de red: ' + e;
+    });
+  });
+
+  function refreshPollerStatusBadge() {
+    var badge = document.getElementById('poller-status-badge');
+    api('poller/status').then(function (res) {
+      if (res.status !== 200 || !res.data) {
+        badge.textContent = 'Poller: estado desconocido.';
+        return;
+      }
+      var s = res.data;
+      if (!s.last_run) {
+        badge.textContent = 'Poller: todavía no corrió ningún ciclo.';
+        return;
+      }
+      var secondsAgo = Math.max(0, Math.round(Date.now() / 1000 - s.last_run));
+      badge.textContent = s.ok
+        ? 'Poller: vivo, último ciclo hace ' + secondsAgo + 's.'
+        : 'Poller: el último ciclo falló hace ' + secondsAgo + 's — ' + (s.error || 'error desconocido');
+      badge.className = 'subtab-hint' + (s.ok ? '' : ' err');
+    }).catch(function () {
+      badge.textContent = 'Poller: no se pudo consultar el estado.';
+    });
+  }
+
+  document.getElementById('btn-save-notify').addEventListener('click', function () {
+    var btn = this;
+    var out = document.getElementById('notify-result');
+    var url = document.getElementById('f-webhook-url').value.trim();
+    out.className = '';
+    out.textContent = 'Guardando…';
+    btn.disabled = true;
+    api('config/save', {
+      method: 'POST',
+      body: {
+        instances: (state.config && state.config.instances) || [],
+        poll: state.config ? state.config.poll : undefined,
+        thresholds: state.config ? state.config.thresholds : undefined,
+        notify: { webhook_url: url || null },
+      },
+    }).then(function (res) {
+      btn.disabled = false;
+      if (res.status === 200) {
+        out.className = 'ok';
+        out.textContent = 'Notificaciones guardadas.';
+        loadConfig();
       } else {
         out.className = 'err';
         out.textContent = 'Error: ' + ((res.data && res.data.error) || 'no se pudo guardar');

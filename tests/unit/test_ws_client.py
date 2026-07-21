@@ -1221,3 +1221,187 @@ def test_login_race_disconnect_between_response_and_authenticated_flag():
     # said "yes" a moment earlier.
     assert client.is_authenticated is False
     assert not client.is_connected
+
+
+# ---------------------------------------------------------------------------
+# Regression: live incident 2026-07-21 — the F4a background poller calling
+# ensure_logged_in() (via routes/api.py's _get_authenticated_connection) on a
+# fixed 60s cadence landed while _background_reconnect was ALSO mid-relogin
+# on the same cached client after an unexpected drop. Both sides observed
+# is_authenticated as False and both called login() — TrueNAS's own auth
+# state machine rejects a SECOND auth.login_with_api_key on the same
+# session outright ("unexpected authenticator run state"), which _do_login
+# treats as a bad/revoked key and poisons needs_auth permanently. Both
+# instances ended up marked unreachable in production until the plugin was
+# restarted. These are the mandatory red-tests (testing.md) for the fix:
+# a state-machine-aware FakeTransport (rejecting a second login on the same
+# socket generation, exactly like the live incident) proves ensure_logged_in
+# actually closes the race rather than merely existing un-exercised.
+# ---------------------------------------------------------------------------
+
+def test_ensure_logged_in_skips_the_call_when_already_authenticated():
+    """The cheap, non-concurrent case: no login frame at all once logged in."""
+    ft = FakeTransport()
+    client = _client_with(ft, sleep_fn=lambda s: None)
+    client.connect()
+
+    def do_login():
+        client.login('ro-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    client.ensure_logged_in('ro-key')  # must be a no-op: already authenticated
+
+    login_frames = [f for f in ft.sent if json.loads(f).get('method') == 'auth.login_with_api_key']
+    assert len(login_frames) == 1
+
+
+def test_ensure_logged_in_raises_immediately_when_needs_auth_already_set():
+    ft = FakeTransport()
+    client = _client_with(ft, sleep_fn=lambda s: None)
+    client.connect()
+    client.needs_auth = True
+
+    with pytest.raises(TrueNASAuthError):
+        client.ensure_logged_in('ro-key')
+    assert ft.sent == []  # never even attempts the doomed call
+
+
+def test_scenario_b_relogin_and_resubscribe_skips_login_if_already_authenticated():
+    """Scenario B (sequential, from the arquitecto review): an external
+    caller's ensure_logged_in() completing FIRST, then
+    _relogin_and_resubscribe() running afterward, must NOT send a second
+    login. This is the exact case an insufficient fix (a lock guarding only
+    the external caller's check-then-login, while _relogin_and_resubscribe
+    still calls _do_login unconditionally) gets wrong — proven by the fact
+    that this test fails if _relogin_and_resubscribe is changed back to call
+    self._do_login(self._api_key) directly instead of
+    self.ensure_logged_in(self._api_key)."""
+    ft = FakeTransport()
+    client = _client_with(ft, sleep_fn=lambda s: None)
+    client.connect()
+    client._api_key = 'stored-key'  # this client had a prior session
+
+    def do_ensure():
+        client.ensure_logged_in('stored-key')
+
+    t = threading.Thread(target=do_ensure)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+    assert client.is_authenticated
+
+    client._relogin_and_resubscribe()  # must see is_authenticated=True, skip login
+
+    login_frames = [f for f in ft.sent if json.loads(f).get('method') == 'auth.login_with_api_key']
+    assert len(login_frames) == 1, (
+        f'expected exactly 1 login frame, got {len(login_frames)} — '
+        f'_relogin_and_resubscribe sent a redundant login on an already-'
+        f'authenticated session'
+    )
+
+
+def test_scenario_a_ensure_logged_in_blocks_during_background_reconnects_relogin():
+    """Scenario A (concurrent): a caller's ensure_logged_in() landing WHILE
+    _background_reconnect's own relogin is in flight (holding _login_lock,
+    blocked waiting for the fake transport's response) must block on the
+    SAME lock — not observe is_authenticated=False and fire its own
+    competing login — then see the session already authenticated once
+    unblocked, and send no login frame of its own."""
+    ft1 = FakeTransport()
+    ft2 = FakeTransport()
+    transports = iter([ft1, ft2])
+
+    def factory(url, verify_tls, timeout, tls_server_name=None):
+        return next(transports)
+
+    client = TrueNASWSClient('truenas.example', 443, transport_factory=factory,
+                              sleep_fn=lambda s: None)
+    client.connect()
+
+    def do_login():
+        client.login('ro-key-123')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft1.sent)
+    req = json.loads(ft1.sent[0])
+    ft1.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    # Drop -> spawns _background_reconnect -> reconnects to ft2 -> its
+    # ensure_logged_in() sends a login frame and BLOCKS on ft2's response,
+    # holding _login_lock the whole time.
+    ft1.push_error(ConnectionResetError('drop'))
+    assert _wait_for(lambda: ft2.sent, timeout=3)
+    relogin_req = json.loads(ft2.sent[0])
+    assert relogin_req['method'] == 'auth.login_with_api_key'
+
+    # The poller (or any browser route) races in RIGHT NOW.
+    poller_done = threading.Event()
+
+    def poller_call():
+        client.ensure_logged_in('ro-key-123')
+        poller_done.set()
+
+    poller_thread = threading.Thread(target=poller_call)
+    poller_thread.start()
+
+    # Genuinely blocked on _login_lock — must NOT finish while the
+    # reconnect's login is still pending. This is not a timing guess: the
+    # poller thread is truly stuck on the lock until we push the response
+    # below, so a bounded wait here is deterministic, not flaky.
+    assert not poller_done.wait(timeout=0.3), (
+        'ensure_logged_in() returned without waiting for the in-flight '
+        'relogin — it fired its own competing login instead of blocking'
+    )
+
+    ft2.push({'jsonrpc': '2.0', 'id': relogin_req['id'], 'result': True})
+    assert poller_done.wait(timeout=2)
+
+    login_frames = [f for f in ft2.sent if json.loads(f).get('method') == 'auth.login_with_api_key']
+    assert len(login_frames) == 1, (
+        f"expected exactly 1 login frame on ft2 (the reconnect worker's), "
+        f"got {len(login_frames)} — the poller sent a redundant concurrent "
+        f"login, reproducing the live incident"
+    )
+    assert client.needs_auth is False
+    _shutdown(client, ft2)
+
+
+def test_scenario_c_stress_many_threads_racing_ensure_logged_in_never_double_logs():
+    """Stress belt-and-suspenders: N threads hammering ensure_logged_in()
+    concurrently against an already-authenticated client must never send
+    more than the one original login frame, and never poison needs_auth."""
+    ft = FakeTransport()
+    client = _client_with(ft, sleep_fn=lambda s: None)
+    client.connect()
+
+    def do_login():
+        client.login('stress-key')
+
+    t = threading.Thread(target=do_login)
+    t.start()
+    assert _wait_for(lambda: ft.sent)
+    req = json.loads(ft.sent[0])
+    ft.push({'jsonrpc': '2.0', 'id': req['id'], 'result': True})
+    t.join(timeout=2)
+
+    threads = [threading.Thread(target=lambda: client.ensure_logged_in('stress-key'))
+               for _ in range(20)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=2)
+
+    login_frames = [f for f in ft.sent if json.loads(f).get('method') == 'auth.login_with_api_key']
+    assert len(login_frames) == 1
+    assert client.needs_auth is False
+    assert client.is_authenticated is True

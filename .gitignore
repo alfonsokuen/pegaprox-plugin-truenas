@@ -6,3 +6,10 @@ __pycache__/
 .coverage
 config.json
 config.json.tmp
+# F3: the encryption key for config.json's api_key_ro/rw — must never be
+# committed, or the whole point of encrypting them at rest is defeated.
+secret.key
+secret.key.tmp
+# F4a: alert-engine persisted state — operational data, not source.
+alerts_state.json
+alerts_state.json.tmp

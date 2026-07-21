@@ -386,6 +386,56 @@ def test_load_or_create_fernet_reuses_an_existing_key_file(tmp_path):
     assert config_store.decrypt_value(token, fernet_2, 'label') == 'a-secret'
 
 
+# ---------------------------------------------------------------------------
+# F4a: notify.webhook_url — same masked-secret round-trip convention as
+# api_key_ro/rw, since a webhook URL commonly embeds a bearer token.
+# ---------------------------------------------------------------------------
+
+def test_default_config_includes_notify():
+    assert config_store.default_config()['notify'] == config_store.DEFAULT_NOTIFY
+
+
+def test_mask_notify_masks_a_configured_url():
+    masked = config_store.mask_notify({'webhook_url': 'http://example.invalid/hook?token=x'})
+    assert masked['webhook_url'] == '***'
+
+
+def test_mask_notify_leaves_unset_url_alone():
+    masked = config_store.mask_notify({'webhook_url': None})
+    assert masked['webhook_url'] is None
+
+
+def test_validate_notify_defaults_when_absent():
+    notify, err = config_store.validate_notify(None)
+    assert err is None
+    assert notify == config_store.DEFAULT_NOTIFY
+
+
+def test_validate_notify_accepts_a_valid_https_url():
+    notify, err = config_store.validate_notify({'webhook_url': 'https://example.invalid/hook'})
+    assert err is None
+    assert notify['webhook_url'] == 'https://example.invalid/hook'
+
+
+def test_validate_notify_rejects_a_non_http_url():
+    notify, err = config_store.validate_notify({'webhook_url': 'not-a-url'})
+    assert notify is None
+    assert 'webhook_url' in err
+
+
+def test_validate_notify_masked_url_round_trips():
+    old = {'webhook_url': 'https://example.invalid/hook?token=secret'}
+    notify, err = config_store.validate_notify({'webhook_url': config_store.MASK}, old)
+    assert err is None
+    assert notify['webhook_url'] == old['webhook_url']
+
+
+def test_validate_notify_masked_url_without_prior_value_errors():
+    notify, err = config_store.validate_notify({'webhook_url': config_store.MASK}, None)
+    assert notify is None
+    assert 'enmascarad' in err
+
+
 def test_save_config_logs_warning_when_chmod_fails(tmp_path, monkeypatch, caplog):
     """config.json holds API keys in clear text — a failed chmod 600 used
     to be swallowed with a bare `except OSError: pass`, hiding a real

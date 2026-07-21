@@ -200,6 +200,24 @@ class TrueNASWSClient:
         self._reconnecting = False
         self._reconnect_guard_lock = threading.Lock()
 
+        # Guards the check-then-login sequence end to end (see
+        # ensure_logged_in) — NOT just against two callers racing each
+        # other, but against ANY second auth.login_with_api_key on the same
+        # socket generation, concurrent OR sequential. Found live
+        # 2026-07-21: TrueNAS's own auth state machine leaves the "LOGIN"
+        # state after the first successful login on a session, so a SECOND
+        # login call (e.g. a caller's explicit login() landing while
+        # _background_reconnect's own relogin is still in flight — or even
+        # right after it finished) is rejected with "unexpected
+        # authenticator run state", which _do_login (wrongly, for this
+        # specific case) treats as a bad/revoked key and poisons
+        # needs_auth permanently. Always acquired BEFORE _connect_lock,
+        # never the reverse, everywhere in this file — no cycle, no
+        # deadlock risk (verified by inspection: _teardown_socket,
+        # _handle_unexpected_disconnect, and the reader thread never touch
+        # this lock, so a socket dropping mid-login cannot deadlock it).
+        self._login_lock = threading.Lock()
+
         # True once a relogin-after-reconnect was rejected by the server
         # (bad/revoked key) rather than failing transiently — the caller
         # (conn_manager / routes) can surface this instead of a generic
@@ -394,10 +412,18 @@ class TrueNASWSClient:
         so ``_background_reconnect`` can tell an auth rejection (give up,
         set ``needs_auth``) apart from a transient failure (retry the whole
         connect+relogin cycle).
+
+        Goes through ``ensure_logged_in`` (not a direct ``_do_login`` call)
+        for the exact same reason every other caller of the shared cached
+        client must: an external caller's ``ensure_logged_in`` racing this
+        method — or landing right after it already finished — must never
+        trigger a second, redundant ``auth.login_with_api_key`` on the
+        already-authenticated session (see ``ensure_logged_in``'s
+        docstring for the live incident this fixes).
         """
         if self._api_key:
             try:
-                self._do_login(self._api_key)
+                self.ensure_logged_in(self._api_key)
             except TrueNASAuthError as e:
                 log.error(f'[truenas] relogin after reconnect rejected by server '
                           f'(bad/revoked key?): {e}')
@@ -638,8 +664,44 @@ class TrueNASWSClient:
     # -- auth -----------------------------------------------------------------
 
     def login(self, api_key):
-        """Authenticate the just-opened socket. Never logs the key itself."""
+        """Authenticate the just-opened socket. Never logs the key itself.
+        Always attempts the login unconditionally — correct for a
+        throwaway, never-cached client (e.g. ``conn_manager.test_connection``'s
+        one-shot "Probar conexión" check), where there's no shared session
+        state anyone else could be racing. For the SHARED, per-instance
+        CACHED client (``conn_manager.get_connection``'s result, used by
+        every read/write route and now the F4a poller), callers must use
+        ``ensure_logged_in`` instead — see its docstring for why."""
         return self._do_login(api_key)
+
+    def ensure_logged_in(self, api_key):
+        """Atomic check-then-login for a SHARED, cached client: skips the
+        login call entirely if another thread already authenticated this
+        exact socket generation while we were waiting for ``_login_lock``.
+
+        This is NOT just "avoid two threads sending auth.login_with_api_key
+        at once" — TrueNAS's own auth state machine rejects a SECOND login
+        on the same session even sequentially, once the first one already
+        succeeded (found live 2026-07-21: a route's explicit login landing
+        right after ``_background_reconnect``'s own relogin already
+        finished still got "unexpected authenticator run state", not a
+        race in the concurrent sense — just a redundant call this method
+        exists to prevent). Every caller that shares a cached client
+        (``routes/api.py``'s ``_get_authenticated_connection`` /
+        ``_get_rw_authenticated_connection``, and ``_relogin_and_resubscribe``
+        below) MUST go through this, never call ``login()``/``_do_login()``
+        directly, or the same double-login rejection resurfaces.
+
+        Raises ``TrueNASAuthError`` immediately if ``needs_auth`` is
+        already set (a previous attempt was rejected) — never retries a
+        doomed call under the lock."""
+        with self._login_lock:
+            if self.needs_auth:
+                raise TrueNASAuthError('auth.login_with_api_key', {
+                    'message': 'API key was rejected on a previous attempt — '
+                               'check/rotate it in Settings before retrying'})
+            if not self.is_authenticated:
+                self._do_login(api_key)
 
     def _do_login(self, api_key):
         try:

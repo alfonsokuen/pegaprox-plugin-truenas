@@ -285,6 +285,18 @@ def test_settings_tab_exposes_global_threshold_inputs():
     assert "id='btn-save-thresholds'" in html or 'id="btn-save-thresholds"' in html
 
 
+def test_settings_tab_exposes_webhook_url_and_poller_status_badge():
+    """F4a (2026-07-21): the notifications card must expose a webhook_url
+    input wired to config/save, and a badge fetching the background
+    poller's liveness status so a silently-dead poller thread is visible,
+    not just something that happens on the backend with no UI trace."""
+    html = _read_ui()
+    assert 'id="f-webhook-url"' in html
+    assert "id='btn-save-notify'" in html or 'id="btn-save-notify"' in html
+    assert "api('poller/status')" in html
+    assert 'function refreshPollerStatusBadge()' in html
+
+
 def test_share_delete_confirms_against_real_name_or_path_not_the_opaque_id():
     """An SMB/NFS share's id is an opaque integer TrueNAS assigns — typing
     it to confirm a delete would be meaningless to an operator. The typed

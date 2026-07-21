@@ -121,6 +121,12 @@ def _fetch_instance(inst, get_conn):
         'hostname': info.get('hostname'),
         'alert_count': len(active_alerts),
         'critical_alert_count': len(critical_alerts),
+        # Raw alert objects, not just the count — the F4a background
+        # poller (core/poller.py) needs each alert's own id to dedup a
+        # relayed notification against TrueNAS's own alert lifecycle
+        # (fires once when it first appears, once when it clears), which a
+        # bare count can't support.
+        'active_alerts': active_alerts,
         'pool_count': len(pools),
         'unhealthy_pools': unhealthy_pools,
         'capacity_used': used,

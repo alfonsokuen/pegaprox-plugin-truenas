@@ -27,6 +27,7 @@ log = logging.getLogger('plugin.truenas.config_store')
 
 DEFAULT_POLL = {'fast_s': 10, 'slow_s': 60, 'cold_s': 900}
 DEFAULT_THRESHOLDS = {'warn_pct': 80, 'crit_pct': 90}
+DEFAULT_NOTIFY = {'webhook_url': None}
 MASK = '***'
 _KEY_FIELDS = ('api_key_ro', 'api_key_rw')
 
@@ -41,7 +42,10 @@ _SECRET_KEY_FILENAME = 'secret.key'
 
 
 def default_config():
-    return {'instances': [], 'poll': dict(DEFAULT_POLL), 'thresholds': dict(DEFAULT_THRESHOLDS)}
+    return {
+        'instances': [], 'poll': dict(DEFAULT_POLL),
+        'thresholds': dict(DEFAULT_THRESHOLDS), 'notify': dict(DEFAULT_NOTIFY),
+    }
 
 
 def _load_or_create_fernet(config_path):
@@ -141,6 +145,9 @@ def load_config(path):
     thresholds = dict(DEFAULT_THRESHOLDS)
     thresholds.update(cfg.get('thresholds') or {})
     cfg['thresholds'] = thresholds
+    notify = dict(DEFAULT_NOTIFY)
+    notify.update(cfg.get('notify') or {})
+    cfg['notify'] = notify
     return cfg
 
 
@@ -360,3 +367,41 @@ def validate_poll(raw_poll):
                 return None, f'poll.{key} must be >= 1'
             poll[key] = value
     return poll, None
+
+
+def mask_notify(notify):
+    """Same masking convention as api_key_ro/rw — a webhook URL commonly
+    embeds a bearer token in its path/query (Slack/Discord/Teams webhooks
+    all work this way), so it's treated as a secret too: masked on GET,
+    round-tripped on save when the masked sentinel comes back unchanged."""
+    safe = dict(notify)
+    if safe.get('webhook_url'):
+        safe['webhook_url'] = MASK
+    return safe
+
+
+def validate_notify(raw, old_notify=None):
+    """Validate the F4a notification-channel config. A ``webhook_url`` of
+    ``None``/``""`` means "no webhook configured" — the poller simply skips
+    delivery, this is not an error (matches api_key_ro/rw's own "falsy is a
+    legitimate unset state" convention). A non-empty value must at least
+    look like an http(s) URL — a typo here would otherwise fail silently
+    forever inside the poller thread instead of at save time, where the
+    operator can see it immediately."""
+    old_notify = old_notify or DEFAULT_NOTIFY
+    notify = dict(DEFAULT_NOTIFY)
+    if raw is None:
+        return notify, None
+    if not isinstance(raw, dict):
+        return None, 'notify must be an object'
+    url = raw.get('webhook_url')
+    if url == MASK:
+        if not old_notify.get('webhook_url'):
+            return None, ('notify.webhook_url: se recibió enmascarado pero no hay un valor '
+                          'previo guardado (volvé a pegar la URL)')
+        notify['webhook_url'] = old_notify['webhook_url']
+    elif url:
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            return None, 'notify.webhook_url must start with http:// or https://'
+        notify['webhook_url'] = url
+    return notify, None

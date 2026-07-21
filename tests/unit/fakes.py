@@ -6,6 +6,8 @@ socket, mirroring the FakeTransport pattern in test_ws_client.py but at the
 ``call()`` level instead of the raw wire level.
 """
 
+from core.errors import TrueNASAuthError
+
 
 class FakeConn:
     """Canned JSON-RPC responses keyed by method name; records every call
@@ -38,6 +40,18 @@ class FakeConn:
     def login(self, api_key):
         self.login_calls.append(api_key)
         self.is_authenticated = True
+
+    def ensure_logged_in(self, api_key):
+        """Mirrors the real ``TrueNASWSClient.ensure_logged_in`` — same
+        check-then-login semantics (skip login() if already authenticated,
+        fail fast on needs_auth) so route-level tests exercise the exact
+        method ``_get_authenticated_connection``/``_get_rw_authenticated_connection``
+        call in production."""
+        if self.needs_auth:
+            raise TrueNASAuthError('auth.login_with_api_key', {
+                'message': 'API key was rejected on a previous attempt'})
+        if not self.is_authenticated:
+            self.login(api_key)
 
     def methods_called(self):
         return [c[0] for c in self.calls]
