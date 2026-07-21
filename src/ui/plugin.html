@@ -403,7 +403,25 @@
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       credentials: 'same-origin',
     }).then(function (r) {
-      return r.json().then(function (data) { return { status: r.status, data: data }; });
+      // Read as text first, THEN try to parse — an intermediate proxy/CDN
+      // (found live 2026-07-21: Cloudflare's tunnel, on a slow or errored
+      // upstream) can return its OWN error page instead of relaying this
+      // plugin's response, and that page is HTML/plain-text, not JSON.
+      // Calling r.json() directly on that throws an uncaught
+      // "Unexpected token '<' ... not valid JSON" with no useful status —
+      // exactly what reached the operator's console. Falling back to a
+      // synthetic {error: ...} keeps every existing call site working
+      // unchanged (they already do `res.data && res.data.error`).
+      return r.text().then(function (raw) {
+        var data;
+        try {
+          data = raw ? JSON.parse(raw) : null;
+        } catch (e) {
+          data = { error: 'non-JSON response (HTTP ' + r.status + ') — likely an ' +
+            'intermediate proxy/CDN error page rather than this plugin' };
+        }
+        return { status: r.status, data: data };
+      });
     });
   }
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.10.3] - 2026-07-21 (frontend: never let a non-JSON response crash-parse)
+
+0.10.2 fixed the SLOWNESS half of "Unexpected token '<'" (backend now
+fails in ~1 attempt instead of ~15-20s for a permanently-broken TLS
+cert) — but re-testing live through the real public domain
+(`pegasus.idkmanager.com`, not just `127.0.0.1:5000`) showed the error
+was never purely about speed: Cloudflare's tunnel returns ITS OWN error
+page (plain-text to a bare client, HTML to a browser) for a 502 from
+this route regardless of how fast the origin answers. This plugin's own
+Flask route was always correct (confirmed again: proper JSON body on
+localhost) — the bug was that the frontend's shared `api()` fetch
+wrapper (`src/ui/plugin.html`) called `r.json()` directly with no
+fallback, so any non-JSON body (an intermediate proxy/CDN's error page,
+not just this specific Cloudflare case) threw an uncaught
+`SyntaxError: Unexpected token '<' ... not valid JSON` instead of
+producing a normal, renderable error.
+
+- `api()` now reads the response as text first, then tries
+  `JSON.parse` in a try/catch. On a parse failure, it synthesizes
+  `{error: 'non-JSON response (HTTP <status>) — likely an intermediate
+  proxy/CDN error page rather than this plugin'}` — the exact same
+  `{error: ...}` shape every route already returns on a real backend
+  error, so every existing call site's `res.data && res.data.error`
+  error-display code works unchanged, no other file touched.
+- Verified: extracted the inline `<script>` and checked with `node
+  --check` — valid syntax. No Python-side behavior changed (363 tests
+  still green; this is a frontend-only fix, nothing to unit-test with
+  pytest).
+
 ## [0.10.2] - 2026-07-21 (fail fast on a permanently-expired TLS cert)
 
 Root-caused the operator's "`.64` no me carga datos" + the recurring
